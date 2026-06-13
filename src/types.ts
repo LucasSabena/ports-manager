@@ -81,12 +81,26 @@ export interface DomainMapping {
   dnsRecordId?: string;
 }
 
+export interface Project {
+  id: string;
+  name: string;
+  cwd: string;
+  command?: string;
+  packageManager?: 'npm' | 'pnpm' | 'yarn' | 'bun';
+  type: 'node' | 'bun' | 'python' | 'docker' | 'other';
+  port?: number;
+  startUrl?: string;
+  autoDetect: boolean;
+  running?: { pid: number; ports: number[]; startedAt: string };
+}
+
 export interface AppConfig {
   auth: {
     username: string;
     passwordHash: string;
   };
   domains: DomainMapping[];
+  projects?: Project[];
   settings: {
     scanIntervalMs: number;
     protectedPids: number[];

@@ -1,8 +1,10 @@
 node_modules
 data/config.json
+data/logs
 .env
 *.log
 dist
 .DS_Store
 .vscode
 .idea
+

@@ -1,6 +1,6 @@
 # Ports Manager
 
-> Panel visual para gestionar proyectos de desarrollo, contenedores Docker y subdominios `.binaryserver.com.ar` desde una sola interfaz web.
+> Panel visual para gestionar proyectos de desarrollo, contenedores Docker y subdominios personalizados desde una sola interfaz web. Funciona con cualquier dominio que administres en Cloudflare.
 
 [![Docker](https://img.shields.io/badge/Docker-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![Bun](https://img.shields.io/badge/Bun-000?logo=bun&logoColor=white)](https://bun.sh/)
@@ -32,7 +32,7 @@
 ## ✨ Características
 
 - 🔍 **Descubrimiento automático** de procesos Node.js, Bun, Python y contenedores Docker con puertos abiertos.
-- 🌐 **Asignación de subdominios** `.binaryserver.com.ar` en un clic, integrado con Cloudflare DNS y Cloudflare Tunnel.
+- 🌐 **Asignación de subdominios** personalizados en un clic, integrado con Cloudflare DNS y Cloudflare Tunnel.
 - 📊 **Estadísticas del servidor** en vivo: CPU, RAM, disco y load average.
 - 📦 **Docker** con dominios asignados, logs, stats y env vars.
 - 🖱️ **Detalle por proyecto/contenedor**: comando, CWD, CPU, memoria, uptime, threads, logs y env.
@@ -40,6 +40,9 @@
 - 🔒 **Autenticación** por cookie segura con sesiones firmadas.
 - 🛡️ **Sanitización** automática de variables sensibles (tokens, keys, passwords).
 - 📥 **Importación** masiva de dominios existentes desde la configuración remota del túnel de Cloudflare.
+- 📁 **Proyectos**: descubrimiento automático de proyectos en disco, arranque/parada desde el panel, logs en tiempo real vía WebSocket.
+- 🔧 **Configuración editable** desde la UI.
+- 🔗 **Links local y network** para cada servicio.
 
 ---
 
@@ -52,7 +55,7 @@ flowchart TB
     end
 
     subgraph Cloudflare
-        DNS[DNS CNAME<br/>*.binaryserver.com.ar]
+        DNS[DNS CNAME<br/>*.tu-dominio.com]
         Tunnel[Cloudflare Tunnel]
     end
 
@@ -106,6 +109,10 @@ CLOUDFLARE_API_TOKEN=          # opcional si usás API Key
 CLOUDFLARE_ZONE_ID=tu-zone-id
 CLOUDFLARE_ACCOUNT_ID=tu-account-id
 CLOUDFLARE_TUNNEL_ID=tu-tunnel-id
+
+# Dominio base para subdominios (ej. example.com -> app.example.com)
+BASE_DOMAIN=tu-dominio.com
+
 SESSION_SECRET=una-clave-larga-y-aleatoria
 ```
 
@@ -186,6 +193,7 @@ Tus dominios y configuración se guardan en `data/config.json`, que persiste fue
     "passwordHash": "..."
   },
   "domains": [],
+  "projects": [],
   "settings": {
     "scanIntervalMs": 5000,
     "protectedPids": [1, 2],
@@ -202,9 +210,31 @@ Tus dominios y configuración se guardan en `data/config.json`, que persiste fue
 | `protectedPorts` | Puertos que no se muestran como asignables |
 | `ignoredPatterns` | Procesos a ocultar en la pestaña Desarrollo |
 
+### Variables de entorno
+
+| Variable | Descripción |
+|----------|-------------|
+| `CLOUDFLARE_EMAIL` | Email de la cuenta Cloudflare (para API Key global) |
+| `CLOUDFLARE_API_KEY` | API Key global de Cloudflare |
+| `CLOUDFLARE_API_TOKEN` | API Token alternativo (no usado si hay API Key) |
+| `CLOUDFLARE_ZONE_ID` | Zone ID del dominio en Cloudflare |
+| `CLOUDFLARE_ACCOUNT_ID` | Account ID de Cloudflare |
+| `CLOUDFLARE_TUNNEL_ID` | Tunnel ID de Cloudflare |
+| `BASE_DOMAIN` | Dominio base para subdominios (ej. `example.com`) |
+| `SESSION_SECRET` | Clave para firmar cookies de sesión |
+
 ### Importar dominios existentes
 
 Si ya tenés subdominios creados manualmente en Cloudflare, andá a la pestaña **Dominios** y usá el botón **Importar desde Cloudflare** (o llamá a `POST /api/domains/import`).
+
+### Gestión de proyectos
+
+La pestaña **Proyectos** descubre automáticamente directorios con `package.json` o `requirements.txt`. Desde allí podés:
+
+- **Iniciar** un proyecto (`POST /api/projects/:id/start`).
+- **Detener** un proyecto (`POST /api/projects/:id/stop`).
+- Ver **logs en vivo** vía WebSocket (`/ws/projects/:id/logs`).
+- Ver links **Local** (`http://localhost:<port>`) y **Network** (`http://<ip>:<port>`).
 
 ---
 
@@ -219,9 +249,9 @@ Si ya tenés subdominios creados manualmente en Cloudflare, andá a la pestaña 
 
 ## 🛣️ Roadmap
 
-- [ ] Soporte para editar configuración desde la UI.
-- [ ] Histórico de logs con WebSocket.
-- [ ] Arrancar/parar proyectos desde el panel.
+- [x] Soporte para editar configuración desde la UI.
+- [x] Histórico de logs con WebSocket.
+- [x] Arrancar/parar proyectos desde el panel.
 - [ ] Soporte multi-usuario con roles.
 - [ ] Tests automatizados.
 

@@ -22,6 +22,7 @@ let currentTab = 'processes';
 let scanInterval = 5000;
 let pollTimer = null;
 let cachedDomains = [];
+let serverIp = '';
 
 // Auth
 async function checkAuth() {
@@ -89,10 +90,17 @@ function setTab(tab) {
 }
 
 // Data loading
+let baseDomain = 'example.com';
+
 async function loadConfig() {
   try {
     const cfg = await API.get('/api/config');
     scanInterval = cfg.scanIntervalMs;
+    if (cfg.baseDomain) {
+      baseDomain = cfg.baseDomain;
+      const suffixEl = document.getElementById('domain-suffix-text');
+      if (suffixEl) suffixEl.textContent = `.${baseDomain}`;
+    }
   } catch {
     scanInterval = 5000;
   }
@@ -150,10 +158,25 @@ async function loadDomains() {
   }
 }
 
+async function loadProjects() {
+  try {
+    const [{ projects }, { domains }] = await Promise.all([
+      API.get('/api/projects'),
+      API.get('/api/domains'),
+    ]);
+    cachedDomains = domains || [];
+    renderProjects(projects, domains);
+    document.getElementById('projects-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
+  } catch (err) {
+    console.error('Failed to load projects:', err);
+  }
+}
+
 function refresh() {
   if (currentTab === 'processes') loadProcesses();
   if (currentTab === 'system') loadSystem();
   if (currentTab === 'docker') loadDocker();
+  if (currentTab === 'projects') loadProjects();
   if (currentTab === 'domains') loadDomains();
 }
 
@@ -173,6 +196,7 @@ async function loadStats() {
     document.getElementById('stat-ram').textContent = `${stats.memoryPercent}%`;
     document.getElementById('stat-disk').textContent = `${stats.diskPercent}%`;
     document.getElementById('stat-load').textContent = stats.loadAverage[0]?.toFixed(2) || '-';
+    if (stats.ip) serverIp = stats.ip;
   } catch (err) {
     console.error('Failed to load stats:', err);
   }
@@ -333,6 +357,82 @@ function renderDomains(domains) {
   }
 }
 
+function getProjectPorts(project) {
+  if (project.running?.ports?.length) return project.running.ports;
+  if (project.port) return [project.port];
+  return [];
+}
+
+function getNetworkHost() {
+  return serverIp || window.location.hostname;
+}
+
+function renderProjectLink(port, label, host) {
+  const url = `http://${host}:${port}`;
+  const cls = label === 'Local' ? 'link-local' : 'link-network';
+  return `<a href="${escapeHtml(url)}" target="_blank" class="${cls}" onclick="event.stopPropagation()">${escapeHtml(label)}</a>`;
+}
+
+function renderProjectLinks(port) {
+  if (!port) return '-';
+  const host = getNetworkHost();
+  return `<div class="port-line">${renderProjectLink(port, 'Local', 'localhost')}${renderProjectLink(port, 'Network', host)}</div>`;
+}
+
+function renderProjects(projects, domains) {
+  const tbody = document.querySelector('#projects-table tbody');
+  const empty = document.getElementById('projects-empty');
+  tbody.innerHTML = '';
+
+  if (!projects || projects.length === 0) {
+    empty.classList.remove('hidden');
+    return;
+  }
+  empty.classList.add('hidden');
+
+  for (const p of projects) {
+    const tr = document.createElement('tr');
+    tr.processData = p;
+    const ports = getProjectPorts(p);
+    const firstPort = ports[0];
+    const isRunning = !!p.running;
+    const statusBadge = isRunning
+      ? '<span class="badge badge-status-running">Running</span>'
+      : '<span class="badge badge-status-stopped">Stopped</span>';
+    const typeClass = `badge-${p.type}`;
+
+    const domain = domains?.find((d) => d.projectName === p.name && d.port === firstPort);
+    let domainHtml = '';
+    if (domain) {
+      domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
+    }
+
+    const portsHtml = ports.length
+      ? ports.map((port) => `<span class="badge badge-other">${port}</span>`).join(' ')
+      : '<span class="text-muted">-</span>';
+
+    const linksHtml = firstPort ? `${renderProjectLinks(firstPort)}${domainHtml ? `<div class="port-line">${domainHtml}</div>` : ''}` : '-';
+
+    const mainAction = isRunning
+      ? `<button class="btn-danger" onclick="event.stopPropagation(); stopProject('${encodeURIComponent(p.id)}')">Detener</button>`
+      : `<button class="btn-action" onclick="event.stopPropagation(); startProject('${encodeURIComponent(p.id)}')">Iniciar</button>`;
+
+    tr.innerHTML = `
+      <td><strong>${escapeHtml(p.name)}</strong><br><small class="text-muted">${escapeHtml(p.cwd || '')}</small></td>
+      <td><span class="badge ${typeClass}">${p.type}</span></td>
+      <td>${statusBadge}</td>
+      <td class="ports-cell">${portsHtml}</td>
+      <td class="links-cell">${linksHtml}</td>
+      <td class="actions">
+        ${mainAction}
+        <button class="btn-action" onclick="event.stopPropagation(); openProjectEditModal('${encodeURIComponent(JSON.stringify(p))}')">Editar</button>
+        <button class="btn-secondary" onclick="event.stopPropagation(); openLogsModal('${encodeURIComponent(JSON.stringify(p))}')">Logs</button>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
@@ -349,6 +449,145 @@ function handleRowClick(e) {
 document.querySelector('#processes-table tbody').addEventListener('click', handleRowClick);
 document.querySelector('#system-table tbody').addEventListener('click', handleRowClick);
 document.querySelector('#docker-table tbody').addEventListener('click', handleRowClick);
+document.querySelector('#projects-table tbody').addEventListener('click', handleRowClick);
+
+// Project actions
+window.startProject = async function (idEncoded) {
+  const id = decodeURIComponent(idEncoded);
+  try {
+    await API.post(`/api/projects/${id}/start`);
+    refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+};
+
+window.stopProject = async function (idEncoded) {
+  const id = decodeURIComponent(idEncoded);
+  if (!confirm('Detener este proyecto?')) return;
+  try {
+    await API.post(`/api/projects/${id}/stop`);
+    refresh();
+  } catch (err) {
+    alert(err.message);
+  }
+};
+
+window.openProjectEditModal = function (projectEncoded) {
+  const project = JSON.parse(decodeURIComponent(projectEncoded));
+  document.getElementById('project-edit-id').value = project.id;
+  document.getElementById('project-edit-name').value = project.name || '';
+  document.getElementById('project-edit-command').value = project.command || '';
+  document.getElementById('project-edit-cwd').value = project.cwd || '';
+  document.getElementById('project-edit-port').value = project.port || '';
+  document.getElementById('project-edit-error').textContent = '';
+  document.getElementById('project-edit-modal').classList.remove('hidden');
+};
+
+// Logs modal
+const logsModal = document.getElementById('logs-modal');
+const logsPre = document.getElementById('logs-pre');
+const logsStatus = document.getElementById('logs-status');
+let logsWs = null;
+let logsReconnectTimer = null;
+let logsReconnectCount = 0;
+let logsCurrentProject = null;
+
+function setLogsStatus(text, type) {
+  logsStatus.textContent = text;
+  logsStatus.className = 'logs-status' + (type ? ` logs-status-${type}` : '');
+}
+
+function connectLogsWebSocket(project) {
+  if (logsWs) {
+    logsWs.close();
+    logsWs = null;
+  }
+  if (logsReconnectTimer) {
+    clearTimeout(logsReconnectTimer);
+    logsReconnectTimer = null;
+  }
+  logsReconnectCount = 0;
+  logsCurrentProject = project;
+
+  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'wss:';
+  const host = window.location.host;
+  const url = `${protocol}//${host}/ws/projects/${project.id}/logs`;
+
+  setLogsStatus('Conectando', 'connecting');
+
+  function doConnect() {
+    try {
+      logsWs = new WebSocket(url);
+    } catch (err) {
+      setLogsStatus('Desconectado', 'disconnected');
+      scheduleReconnect();
+      return;
+    }
+
+    logsWs.onopen = () => {
+      setLogsStatus('Conectado', 'connected');
+      logsReconnectCount = 0;
+    };
+
+    logsWs.onmessage = (event) => {
+      logsPre.textContent += event.data + '\n';
+      logsPre.scrollTop = logsPre.scrollHeight;
+    };
+
+    logsWs.onclose = () => {
+      setLogsStatus('Desconectado', 'disconnected');
+      logsWs = null;
+      scheduleReconnect();
+    };
+
+    logsWs.onerror = () => {
+      setLogsStatus('Desconectado', 'disconnected');
+    };
+  }
+
+  function scheduleReconnect() {
+    if (logsReconnectCount >= 5) return;
+    if (logsReconnectTimer) return;
+    logsReconnectCount++;
+    logsReconnectTimer = setTimeout(() => {
+      logsReconnectTimer = null;
+      setLogsStatus('Conectando', 'connecting');
+      doConnect();
+    }, 3000);
+  }
+
+  doConnect();
+}
+
+window.openLogsModal = function (projectEncoded) {
+  const project = JSON.parse(decodeURIComponent(projectEncoded));
+  document.getElementById('logs-modal-title').textContent = `Logs de ${project.name}`;
+  logsPre.textContent = '';
+  logsModal.classList.remove('hidden');
+  connectLogsWebSocket(project);
+};
+
+function closeLogsModal() {
+  if (logsWs) {
+    logsWs.close();
+    logsWs = null;
+  }
+  if (logsReconnectTimer) {
+    clearTimeout(logsReconnectTimer);
+    logsReconnectTimer = null;
+  }
+  logsCurrentProject = null;
+  logsModal.classList.add('hidden');
+}
+
+document.getElementById('logs-close').addEventListener('click', closeLogsModal);
+document.getElementById('logs-clear').addEventListener('click', () => {
+  logsPre.textContent = '';
+});
+logsModal.addEventListener('click', (e) => {
+  if (e.target === logsModal) closeLogsModal();
+});
 
 // Kill modal
 const killModal = document.getElementById('kill-modal');
@@ -426,6 +665,9 @@ function openDetailModal(p) {
 
   if (p.type === 'docker') {
     document.getElementById('detail-meta').innerHTML = `<span class="badge badge-docker">docker</span> ID ${escapeHtml(p.id)} · ${ports}`;
+  } else if (p.id && !p.pid) {
+    const status = p.running ? 'Corriendo' : 'Detenido';
+    document.getElementById('detail-meta').innerHTML = `<span class="badge badge-${p.type}">${p.type}</span> ${status} · ${ports}`;
   } else {
     document.getElementById('detail-meta').innerHTML = `<span class="badge badge-${p.type}">${p.type}</span> PID ${p.pid} · ${ports}`;
   }
@@ -447,15 +689,37 @@ function openDetailModal(p) {
   if (p.type === 'docker') {
     killBtn.textContent = 'Stop';
     killBtn.onclick = () => stopDocker(p.id);
+  } else if (p.id && !p.pid) {
+    killBtn.textContent = p.running ? 'Detener' : 'Iniciar';
+    killBtn.onclick = () => (p.running ? stopProject(encodeURIComponent(p.id)) : startProject(encodeURIComponent(p.id)));
   } else {
     killBtn.textContent = 'Kill';
     killBtn.onclick = () => killProcess(p.pid, matchName);
   }
 
+  renderDetailLinks(p);
+
   setDetailTab('info');
   detailModal.classList.remove('hidden');
   loadDetailInfo();
   startDetailStats();
+}
+
+function renderDetailLinks(p) {
+  const dd = document.getElementById('detail-links');
+  const ports = p.ports || (p.port ? [p.port] : []);
+  const firstPort = ports[0];
+  if (!firstPort) {
+    dd.textContent = '-';
+    return;
+  }
+  const host = getNetworkHost();
+  dd.innerHTML = `
+    <div class="port-line">
+      ${renderProjectLink(firstPort, 'Local', 'localhost')}
+      ${renderProjectLink(firstPort, 'Network', host)}
+    </div>
+  `;
 }
 
 function closeDetailModal() {
@@ -476,6 +740,9 @@ async function loadDetailInfo() {
   if (!detailCurrentPid) return;
   if (detailCurrentProcess?.type === 'docker') {
     return loadDockerDetailInfo();
+  }
+  if (detailCurrentProcess?.id && !detailCurrentProcess?.pid) {
+    return loadProjectDetailInfo();
   }
   try {
     const info = await API.get(`/api/processes/${detailCurrentPid}/detail`);
@@ -541,6 +808,33 @@ async function loadDockerDetailInfo() {
   }
 }
 
+async function loadProjectDetailInfo() {
+  let info = detailCurrentProcess;
+  try {
+    info = await API.get(`/api/projects/${detailCurrentPid}`);
+  } catch (err) {
+    console.error('Failed to load project detail info:', err);
+  }
+  document.getElementById('detail-label-cwd').textContent = 'CWD';
+  document.getElementById('detail-label-cmd').textContent = 'Comando';
+  document.getElementById('detail-label-ppid').textContent = 'PID';
+  document.getElementById('detail-label-start').textContent = 'Estado';
+  document.getElementById('detail-label-runtime').textContent = 'Tipo';
+  document.getElementById('detail-label-working-dir').textContent = 'Directorio de trabajo';
+
+  document.getElementById('detail-cwd').textContent = info.cwd || '-';
+  document.getElementById('detail-cmd').textContent = info.command || '-';
+  document.getElementById('detail-ppid').textContent = info.running?.pid || '-';
+  document.getElementById('detail-start').textContent = info.running ? 'Corriendo' : 'Detenido';
+  document.getElementById('detail-runtime').textContent = info.type || '-';
+  document.getElementById('detail-working-dir').textContent = info.cwd || '-';
+
+  document.getElementById('detail-logs-source').classList.add('hidden');
+  document.getElementById('detail-logs-empty').classList.add('hidden');
+
+  renderDetailEnv(info.env);
+}
+
 function renderDetailEnv(env) {
   const tbody = document.querySelector('#detail-env-table tbody');
   tbody.innerHTML = '';
@@ -571,6 +865,13 @@ async function loadDetailStats() {
   if (!detailCurrentPid) return;
   if (detailCurrentProcess?.type === 'docker') {
     return loadDockerDetailStats();
+  }
+  if (detailCurrentProcess?.id && !detailCurrentProcess?.pid) {
+    document.getElementById('detail-stats-cpu').textContent = '-';
+    document.getElementById('detail-stats-memory').textContent = '-';
+    document.getElementById('detail-stats-uptime').textContent = '-';
+    document.getElementById('detail-stats-threads').textContent = '-';
+    return;
   }
   try {
     const { stats } = await API.get(`/api/processes/${detailCurrentPid}/stats`);
@@ -659,6 +960,9 @@ async function loadDetailLogs() {
   if (detailCurrentProcess?.type === 'docker') {
     return loadDockerDetailLogs();
   }
+  if (detailCurrentProcess?.id && !detailCurrentProcess?.pid) {
+    return loadProjectDetailLogs();
+  }
   const sourceSelect = document.getElementById('detail-logs-source');
   const source = sourceSelect.value || '';
   try {
@@ -677,6 +981,17 @@ async function loadDockerDetailLogs() {
     pre.textContent = Array.isArray(data.lines) ? data.lines.join('\n') : 'Sin logs disponibles';
   } catch (err) {
     console.error('Failed to load docker logs:', err);
+    pre.textContent = `Error cargando logs: ${err.message}`;
+  }
+}
+
+async function loadProjectDetailLogs() {
+  const pre = document.getElementById('detail-logs-pre');
+  try {
+    const data = await API.get(`/api/projects/${detailCurrentPid}/logs`);
+    pre.textContent = Array.isArray(data.lines) ? data.lines.join('\n') : 'Sin logs disponibles';
+  } catch (err) {
+    console.error('Failed to load project logs:', err);
     pre.textContent = `Error cargando logs: ${err.message}`;
   }
 }
@@ -762,6 +1077,106 @@ domainForm.addEventListener('submit', async (e) => {
 
 modal.addEventListener('click', (e) => {
   if (e.target === modal) modal.classList.add('hidden');
+});
+
+// Project edit modal
+const projectEditModal = document.getElementById('project-edit-modal');
+const projectEditForm = document.getElementById('project-edit-form');
+
+document.getElementById('project-edit-cancel').addEventListener('click', () => {
+  projectEditModal.classList.add('hidden');
+});
+
+projectEditForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const id = document.getElementById('project-edit-id').value;
+  const body = {
+    name: document.getElementById('project-edit-name').value,
+    command: document.getElementById('project-edit-command').value,
+    cwd: document.getElementById('project-edit-cwd').value,
+    port: parseInt(document.getElementById('project-edit-port').value, 10),
+  };
+  const errorEl = document.getElementById('project-edit-error');
+  try {
+    await API.post('/api/projects', { id, ...body });
+    projectEditModal.classList.add('hidden');
+    refresh();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
+});
+
+projectEditModal.addEventListener('click', (e) => {
+  if (e.target === projectEditModal) projectEditModal.classList.add('hidden');
+});
+
+// Settings modal
+const settingsModal = document.getElementById('settings-modal');
+const settingsForm = document.getElementById('settings-form');
+
+document.getElementById('settings-btn').addEventListener('click', openSettingsModal);
+document.getElementById('settings-cancel').addEventListener('click', () => {
+  settingsModal.classList.add('hidden');
+});
+
+async function openSettingsModal() {
+  try {
+    const cfg = await API.get('/api/config');
+    document.getElementById('settings-scan-interval').value = cfg.scanIntervalMs || 5000;
+    document.getElementById('settings-protected-pids').value = arrayToCsv(cfg.protectedPids);
+    document.getElementById('settings-protected-ports').value = arrayToCsv(cfg.protectedPorts);
+    document.getElementById('settings-ignored-patterns').value = arrayToCsv(cfg.ignoredPatterns);
+    document.getElementById('settings-error').textContent = '';
+    settingsModal.classList.remove('hidden');
+  } catch (err) {
+    console.error('Failed to load config:', err);
+    alert('No se pudo cargar la configuracion');
+  }
+}
+
+function arrayToCsv(value) {
+  if (!Array.isArray(value)) return '';
+  return value.join(', ');
+}
+
+function parseCsvNumbers(value) {
+  return String(value)
+    .split(/[,\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => parseInt(s, 10))
+    .filter((n) => !isNaN(n));
+}
+
+function parseCsvStrings(value) {
+  return String(value)
+    .split(/[,\n]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+settingsForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = {
+    scanIntervalMs: parseInt(document.getElementById('settings-scan-interval').value, 10),
+    protectedPids: parseCsvNumbers(document.getElementById('settings-protected-pids').value),
+    protectedPorts: parseCsvNumbers(document.getElementById('settings-protected-ports').value),
+    ignoredPatterns: parseCsvStrings(document.getElementById('settings-ignored-patterns').value),
+  };
+  const errorEl = document.getElementById('settings-error');
+  try {
+    await API.put('/api/config', body);
+    settingsModal.classList.add('hidden');
+    scanInterval = body.scanIntervalMs;
+    stopPolling();
+    startPolling();
+  } catch (err) {
+    errorEl.textContent = err.message;
+  }
+});
+
+settingsModal.addEventListener('click', (e) => {
+  if (e.target === settingsModal) settingsModal.classList.add('hidden');
 });
 
 // Init

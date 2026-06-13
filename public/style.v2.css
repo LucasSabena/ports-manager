@@ -579,3 +579,148 @@ tbody tr:last-child td { border-bottom: none; }
   background: var(--success);
   color: white;
 }
+
+.link-local,
+.link-network {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.5rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  text-decoration: none;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.link-local {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--primary);
+}
+
+.link-local:hover {
+  background: var(--primary);
+  color: white;
+}
+
+.link-network {
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--warning);
+}
+
+.link-network:hover {
+  background: var(--warning);
+  color: white;
+}
+
+.badge-status-running {
+  background: rgba(34, 197, 94, 0.15);
+  color: var(--success);
+}
+
+.badge-status-stopped {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-muted);
+}
+
+.links-cell .port-line {
+  margin-bottom: 0.25rem;
+}
+
+/* Logs modal */
+.logs-modal-content {
+  max-width: 900px;
+  width: 90vw;
+  display: flex;
+  flex-direction: column;
+  max-height: 85vh;
+}
+
+.logs-modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.75rem;
+}
+
+.logs-modal-header h3 {
+  margin: 0 0 0.25rem;
+}
+
+.logs-modal-actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.logs-status {
+  font-size: 0.8125rem;
+  font-weight: 600;
+}
+
+.logs-status-connecting {
+  color: var(--warning);
+}
+
+.logs-status-connected {
+  color: var(--success);
+}
+
+.logs-status-disconnected {
+  color: var(--danger);
+}
+
+.logs-pre {
+  background: var(--bg);
+  color: var(--text);
+  font-family: monospace;
+  font-size: 0.8125rem;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  flex: 1;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  min-height: 300px;
+}
+
+/* Settings modal */
+#settings-form textarea,
+#settings-form input[type="number"],
+#project-edit-form input[type="number"],
+#project-edit-form input[type="text"] {
+  width: 100%;
+  padding: 0.625rem 0.875rem;
+  margin-top: 0.25rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  color: var(--text);
+  font-size: 0.9375rem;
+  resize: vertical;
+}
+
+#settings-form label,
+#project-edit-form label {
+  display: block;
+  margin-bottom: 1rem;
+  color: var(--text-muted);
+  font-size: 0.875rem;
+}
+
+.detail-links {
+  margin-top: 1rem;
+}
+
+.detail-links dt {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.25rem;
+}
+
+.detail-links dd {
+  margin: 0;
+}

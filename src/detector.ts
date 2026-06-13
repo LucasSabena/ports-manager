@@ -125,6 +125,36 @@ export async function getListeningPorts(): Promise<PortMapping[]> {
   }
 }
 
+export async function getProcessListeningPorts(pid: number): Promise<number[]> {
+  try {
+    const output = await $`ss -tlnp`.text();
+    const lines = output.split('\n').slice(1);
+    const ports = new Set<number>();
+
+    for (const line of lines) {
+      const match = line.match(/^\s*\S+\s+\d+\s+\d+\s+(\S+):(\d+)\s+\S+\s+.*users:\(\("([^"]+)",pid=(\d+)/);
+      if (match) {
+        const [, , portStr, , pidStr] = match;
+        if (parseInt(pidStr, 10) === pid) {
+          ports.add(parseInt(portStr, 10));
+        }
+      }
+    }
+    return Array.from(ports).sort((a, b) => a - b);
+  } catch {
+    return [];
+  }
+}
+
+export async function getServerIp(): Promise<string> {
+  try {
+    const output = await $`ip route get 1.1.1.1`.text();
+    const match = output.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
+    if (match && !match[1].startsWith('127.')) return match[1];
+  } catch { /* ignore */ }
+  return '127.0.0.1';
+}
+
 function parseCmdline(buffer: Buffer): string {
   return buffer.toString('utf-8').replace(/\0/g, ' ').trim();
 }

@@ -10,6 +10,7 @@ export interface ServerStats {
   diskPercent: number;
   loadAverage: number[];
   temperatures?: Record<string, number>;
+  ip?: string;
 }
 
 function parseMeminfo(content: string, key: string): number {
@@ -54,6 +55,10 @@ export async function getServerStats(): Promise<ServerStats> {
 
     const temperatures = parseSensors(sensors);
 
+    const ipOutput = await $`ip route get 1.1.1.1`.text().catch(() => '');
+    const ipMatch = ipOutput.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
+    const serverIp = (ipMatch && !ipMatch[1].startsWith('127.')) ? ipMatch[1] : '';
+
     return {
       cpuPercent,
       memoryUsedMb,
@@ -64,6 +69,7 @@ export async function getServerStats(): Promise<ServerStats> {
       diskPercent,
       loadAverage,
       temperatures,
+      ip: serverIp,
     };
   } catch (error) {
     console.error('Failed to get server stats:', error);

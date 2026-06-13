@@ -36,7 +36,19 @@ import {
   getSession,
 } from './auth';
 import { getServerStats } from './stats';
-import type { AppConfig, DomainMapping, ProcessDetails } from './types';
+import {
+  initProjectManager,
+  getProjects,
+  getProjectById,
+  loadProjects,
+  detectProjectsFromDisk,
+  saveProjects,
+  startProject,
+  stopProject,
+  getProjectLogs,
+  subscribeToLogs,
+} from './projectManager';
+import type { AppConfig, DomainMapping, ProcessDetails, Project } from './types';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
 const PORT = parseInt(process.env.PORT || '3457', 10);
@@ -64,6 +76,8 @@ function generateId(): string {
 
 const app = new Hono();
 let config = await loadConfig();
+initProjectManager(config, saveConfig);
+await loadProjects();
 
 // Auth
 app.post('/api/login', async (c) => {
@@ -91,6 +105,114 @@ app.get('/api/me', async (c) => {
 
 // Protected API
 app.use('/api/*', requireAuth);
+
+app.get('/api/projects', async (c) => {
+  return c.json({ projects: getProjects() });
+});
+
+app.post('/api/projects/detect', async (c) => {
+  const detected = await detectProjectsFromDisk();
+  const existing = getProjects();
+  const byCwd = new Map(existing.map((p) => [p.cwd, p]));
+  for (const project of detected) {
+    if (!byCwd.has(project.cwd)) {
+      byCwd.set(project.cwd, project);
+    }
+  }
+  const merged = Array.from(byCwd.values()).sort((a, b) => a.name.localeCompare(b.name));
+  await saveProjects(merged);
+  return c.json({ projects: getProjects() });
+});
+
+app.post('/api/projects', async (c) => {
+  const body = await c.req.json<Partial<Project>>();
+  if (!body.name || !body.cwd || !body.type) {
+    return c.json({ error: 'Missing required fields: name, cwd, type' }, 400);
+  }
+
+  const existing = body.id ? getProjectById(body.id) : undefined;
+  const id = existing ? existing.id : body.id || generateId();
+
+  const project: Project = {
+    id,
+    name: body.name,
+    cwd: body.cwd,
+    command: body.command,
+    packageManager: body.packageManager,
+    type: body.type,
+    port: body.port,
+    startUrl: body.startUrl,
+    autoDetect: existing ? existing.autoDetect : false,
+  };
+
+  const others = getProjects().filter((p) => p.id !== id);
+  others.push(project);
+  await saveProjects(others);
+  return c.json({ success: true, project });
+});
+
+app.get('/api/projects/:id', async (c) => {
+  const id = c.req.param('id');
+  const project = getProjectById(id);
+  if (!project) {
+    return c.json({ error: 'Project not found' }, 404);
+  }
+  return c.json(project);
+});
+
+app.post('/api/projects/:id/start', async (c) => {
+  const id = c.req.param('id');
+  const project = getProjectById(id);
+  if (!project) {
+    return c.json({ error: 'Project not found' }, 404);
+  }
+  let command: string | undefined;
+  try {
+    const contentType = c.req.header('content-type') || '';
+    const hasBody = c.req.raw.headers.get('content-length') || c.req.raw.headers.get('transfer-encoding');
+    if (hasBody && contentType.includes('application/json')) {
+      const body = await c.req.json<{ command?: string }>();
+      command = body.command;
+    }
+  } catch { /* optional body */ }
+  const result = await startProject(project, command);
+  return c.json(result);
+});
+
+app.post('/api/projects/:id/stop', async (c) => {
+  const id = c.req.param('id');
+  const project = getProjectById(id);
+  if (!project) {
+    return c.json({ error: 'Project not found' }, 404);
+  }
+  const result = await stopProject(project);
+  return c.json(result);
+});
+
+app.get('/api/projects/:id/logs', async (c) => {
+  const id = c.req.param('id');
+  const project = getProjectById(id);
+  if (!project) {
+    return c.json({ error: 'Project not found' }, 404);
+  }
+  const tail = parseInt(c.req.query('tail') || '200', 10);
+  const lines = await getProjectLogs(project, tail);
+  return c.json({ lines });
+});
+
+app.put('/api/config', async (c) => {
+  const body = await c.req.json<Partial<AppConfig['settings']>>();
+  config.settings = {
+    ...config.settings,
+    ...body,
+    protectedPids: body.protectedPids ?? config.settings.protectedPids,
+    protectedPorts: body.protectedPorts ?? config.settings.protectedPorts,
+    ignoredPatterns: body.ignoredPatterns ?? config.settings.ignoredPatterns,
+    scanIntervalMs: body.scanIntervalMs ?? config.settings.scanIntervalMs,
+  };
+  await saveConfig(config);
+  return c.json({ success: true, settings: config.settings });
+});
 
 app.get('/api/processes', async (c) => {
   const all = c.req.query('all') === '1';
@@ -468,10 +590,13 @@ app.delete('/api/domains/:id', async (c) => {
 });
 
 app.get('/api/config', async (c) => {
+  const baseDomain = process.env.BASE_DOMAIN || 'example.com';
   return c.json({
     scanIntervalMs: config.settings.scanIntervalMs,
+    protectedPids: config.settings.protectedPids,
     protectedPorts: config.settings.protectedPorts,
     ignoredPatterns: config.settings.ignoredPatterns || [],
+    baseDomain,
   });
 });
 
@@ -491,7 +616,45 @@ app.onError((err, c) => {
 });
 
 console.log(`Starting ports-manager on port ${PORT}`);
-export default {
+
+Bun.serve<{ id: string }>({
   port: PORT,
-  fetch: app.fetch,
-};
+  fetch(request, server) {
+    const url = new URL(request.url);
+    const match = url.pathname.match(/^\/ws\/projects\/([^/]+)\/logs$/);
+    if (match) {
+      const success = server.upgrade(request, { data: { id: match[1] } });
+      if (success) return undefined as any;
+      return new Response('Upgrade required', { status: 426 });
+    }
+    return app.fetch(request, { server });
+  },
+  websocket: {
+    open(ws) {
+      const { id } = ws.data;
+      const project = getProjectById(id);
+      if (!project) {
+        ws.close(1008, 'Project not found');
+        return;
+      }
+      getProjectLogs(project, 100)
+        .then((lines) => {
+          for (const line of lines) {
+            ws.send(line);
+          }
+        })
+        .catch(() => { /* ignore */ });
+      const unsubscribe = subscribeToLogs(id, (line) => {
+        ws.send(line);
+      });
+      (ws as any).unsubscribe = unsubscribe;
+    },
+    message(ws, message) {
+      // Client messages are ignored
+    },
+    close(ws) {
+      const unsubscribe = (ws as any).unsubscribe as (() => void) | undefined;
+      if (unsubscribe) unsubscribe();
+    },
+  },
+});

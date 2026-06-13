@@ -47,6 +47,7 @@
         </div>
         <div class="header-actions">
           <span id="user-name"></span>
+          <button id="settings-btn" class="btn-secondary">⚙️ Config</button>
           <button id="logout-btn" class="btn-secondary">Salir</button>
         </div>
       </header>
@@ -55,6 +56,7 @@
         <button class="tab-btn active" data-tab="processes">Desarrollo</button>
         <button class="tab-btn" data-tab="system">Sistema</button>
         <button class="tab-btn" data-tab="docker">Docker</button>
+        <button class="tab-btn" data-tab="projects">Proyectos</button>
         <button class="tab-btn" data-tab="domains">Dominios</button>
       </nav>
 
@@ -128,6 +130,29 @@
           <div id="docker-empty" class="empty-state hidden">No hay contenedores Docker corriendo</div>
         </section>
 
+        <section id="tab-projects" class="tab-content">
+          <div class="section-header">
+            <h2>Proyectos</h2>
+            <span class="last-updated" id="projects-updated"></span>
+          </div>
+          <div class="table-wrapper">
+            <table id="projects-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Tipo</th>
+                  <th>Estado</th>
+                  <th>Puerto(s)</th>
+                  <th>Links</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="projects-empty" class="empty-state hidden">No hay proyectos registrados</div>
+        </section>
+
         <section id="tab-domains" class="tab-content">
           <div class="section-header">
             <h2>Dominios asignados</h2>
@@ -160,7 +185,7 @@
         <label>
           Subdominio
           <input type="text" id="domain-input" placeholder="miproyecto" required>
-          <span class="domain-suffix">.binaryserver.com.ar</span>
+          <span class="domain-suffix">.<span id="domain-suffix-text">.example.com</span></span>
         </label>
         <input type="hidden" id="domain-port">
         <input type="hidden" id="domain-type">
@@ -220,6 +245,10 @@
           <dt id="detail-label-cmd">Comando completo</dt>
           <dd id="detail-cmd" class="cmd-box">-</dd>
         </div>
+        <div class="detail-full detail-links">
+          <dt>Links rapidos</dt>
+          <dd id="detail-links">-</dd>
+        </div>
       </div>
 
         <div id="detail-tab-stats" class="detail-tab-content">
@@ -251,6 +280,81 @@
           </table>
         </div>
       </div>
+    </div>
+  </div>
+
+  <div id="logs-modal" class="modal hidden">
+    <div class="modal-content logs-modal-content">
+      <div class="logs-modal-header">
+        <div>
+          <h3 id="logs-modal-title">Logs</h3>
+          <span id="logs-status" class="logs-status">Desconectado</span>
+        </div>
+        <div class="logs-modal-actions">
+          <button type="button" id="logs-clear" class="btn-secondary">Limpiar</button>
+          <button type="button" id="logs-close" class="btn-secondary">Cerrar</button>
+        </div>
+      </div>
+      <pre id="logs-pre" class="logs-pre"></pre>
+    </div>
+  </div>
+
+  <div id="project-edit-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Editar proyecto</h3>
+      <form id="project-edit-form">
+        <label>
+          Nombre
+          <input type="text" id="project-edit-name" required>
+        </label>
+        <label>
+          Comando
+          <input type="text" id="project-edit-command" required>
+        </label>
+        <label>
+          Directorio de trabajo
+          <input type="text" id="project-edit-cwd" required>
+        </label>
+        <label>
+          Puerto esperado
+          <input type="number" id="project-edit-port" min="1" max="65535" required>
+        </label>
+        <input type="hidden" id="project-edit-id">
+        <div id="project-edit-error" class="error"></div>
+        <div class="modal-actions">
+          <button type="button" id="project-edit-cancel" class="btn-secondary">Cancelar</button>
+          <button type="submit" class="btn-primary">Guardar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Configuracion</h3>
+      <form id="settings-form">
+        <label>
+          Intervalo de escaneo (ms)
+          <input type="number" id="settings-scan-interval" min="1000" step="1000" required>
+        </label>
+        <label>
+          PIDs protegidos (separados por coma)
+          <textarea id="settings-protected-pids" rows="2" placeholder="1, 2, 3"></textarea>
+        </label>
+        <label>
+          Puertos protegidos (separados por coma)
+          <textarea id="settings-protected-ports" rows="2" placeholder="22, 80, 443"></textarea>
+        </label>
+        <label>
+          Patrones ignorados (separados por coma o una por linea)
+          <textarea id="settings-ignored-patterns" rows="4" placeholder="node_modules, .git"></textarea>
+        </label>
+        <div id="settings-error" class="error"></div>
+        <div class="modal-actions">
+          <button type="button" id="settings-cancel" class="btn-secondary">Cancelar</button>
+          <button type="submit" class="btn-primary">Guardar</button>
+        </div>
+      </form>
     </div>
   </div>
 
