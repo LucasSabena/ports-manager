@@ -23,6 +23,7 @@ let scanInterval = 5000;
 let pollTimer = null;
 let cachedDomains = [];
 let serverIp = '';
+let cachedProjects = [];
 
 // Auth
 async function checkAuth() {
@@ -99,7 +100,7 @@ async function loadConfig() {
     if (cfg.baseDomain) {
       baseDomain = cfg.baseDomain;
       const suffixEl = document.getElementById('domain-suffix-text');
-      if (suffixEl) suffixEl.textContent = `.${baseDomain}`;
+      if (suffixEl) suffixEl.textContent = baseDomain;
     }
   } catch {
     scanInterval = 5000;
@@ -165,6 +166,7 @@ async function loadProjects() {
       API.get('/api/domains'),
     ]);
     cachedDomains = domains || [];
+    cachedProjects = projects || [];
     renderProjects(projects, domains);
     document.getElementById('projects-updated').textContent = `Actualizado ${new Date().toLocaleTimeString()}`;
   } catch (err) {
@@ -379,6 +381,23 @@ function renderProjectLinks(port) {
   return `<div class="port-line">${renderProjectLink(port, 'Local', 'localhost')}${renderProjectLink(port, 'Network', host)}</div>`;
 }
 
+function groupProjectsByFolder(projects) {
+  const groups = {};
+  for (const p of projects) {
+    const folder = p.cwd ? pathDirname(p.cwd) : 'Sin carpeta';
+    if (!groups[folder]) groups[folder] = [];
+    groups[folder].push(p);
+  }
+  return groups;
+}
+
+function pathDirname(fullPath) {
+  if (!fullPath) return 'Sin carpeta';
+  const idx = fullPath.lastIndexOf('/');
+  if (idx <= 0) return fullPath;
+  return fullPath.slice(0, idx) || '/';
+}
+
 function renderProjects(projects, domains) {
   const tbody = document.querySelector('#projects-table tbody');
   const empty = document.getElementById('projects-empty');
@@ -390,47 +409,65 @@ function renderProjects(projects, domains) {
   }
   empty.classList.add('hidden');
 
-  for (const p of projects) {
-    const tr = document.createElement('tr');
-    tr.processData = p;
-    const ports = getProjectPorts(p);
-    const firstPort = ports[0];
-    const isRunning = !!p.running;
-    const statusBadge = isRunning
-      ? '<span class="badge badge-status-running">Running</span>'
-      : '<span class="badge badge-status-stopped">Stopped</span>';
-    const typeClass = `badge-${p.type}`;
+  const groups = groupProjectsByFolder(projects);
+  const sortedFolders = Object.keys(groups).sort();
 
-    const domain = domains?.find((d) => d.projectName === p.name && d.port === firstPort);
-    let domainHtml = '';
-    if (domain) {
-      domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
+  for (const folder of sortedFolders) {
+    const folderRow = document.createElement('tr');
+    folderRow.className = 'folder-row';
+    folderRow.innerHTML = `<td colspan="6"><strong>${escapeHtml(folder)}</strong> <span class="text-muted">(${groups[folder].length})</span></td>`;
+    tbody.appendChild(folderRow);
+
+    const sorted = groups[folder].sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+    for (const p of sorted) {
+      const tr = document.createElement('tr');
+      tr.processData = p;
+      const ports = getProjectPorts(p);
+      const firstPort = ports[0];
+      const isRunning = !!p.running;
+      const statusBadge = isRunning
+        ? '<span class="badge badge-status-running">Running</span>'
+        : '<span class="badge badge-status-stopped">Stopped</span>';
+      const typeClass = `badge-${p.type}`;
+
+      const domain = domains?.find((d) => d.projectName === p.name && d.port === firstPort);
+      let domainHtml = '';
+      if (domain) {
+        domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
+      }
+
+      const portsHtml = ports.length
+        ? ports.map((port) => `<span class="badge badge-other">${port}</span>`).join(' ')
+        : '<span class="text-muted">-</span>';
+
+      const linksHtml = firstPort ? `${renderProjectLinks(firstPort)}${domainHtml ? `<div class="port-line">${domainHtml}</div>` : ''}` : '-';
+
+      const mainAction = isRunning
+        ? `<button class="btn-danger" onclick="event.stopPropagation(); stopProject('${encodeURIComponent(p.id)}')">Detener</button>`
+        : `<button class="btn-action" onclick="event.stopPropagation(); startProject('${encodeURIComponent(p.id)}')">Iniciar</button>`;
+
+      const projectJson = encodeURIComponent(JSON.stringify(p));
+      tr.innerHTML = `
+        <td><strong>${escapeHtml(p.name)}</strong><br><small class="text-muted">${escapeHtml(pathBasename(p.cwd || ''))}</small></td>
+        <td><span class="badge ${typeClass}">${p.type}</span></td>
+        <td>${statusBadge}</td>
+        <td class="ports-cell">${portsHtml}</td>
+        <td class="links-cell">${linksHtml}</td>
+        <td class="actions">
+          ${mainAction}
+          <button class="btn-action" onclick="event.stopPropagation(); openProjectEditModal('${projectJson}')">Editar</button>
+          <button class="btn-secondary" onclick="event.stopPropagation(); openLogsModal('${projectJson}')">Logs</button>
+        </td>
+      `;
+      tbody.appendChild(tr);
     }
-
-    const portsHtml = ports.length
-      ? ports.map((port) => `<span class="badge badge-other">${port}</span>`).join(' ')
-      : '<span class="text-muted">-</span>';
-
-    const linksHtml = firstPort ? `${renderProjectLinks(firstPort)}${domainHtml ? `<div class="port-line">${domainHtml}</div>` : ''}` : '-';
-
-    const mainAction = isRunning
-      ? `<button class="btn-danger" onclick="event.stopPropagation(); stopProject('${encodeURIComponent(p.id)}')">Detener</button>`
-      : `<button class="btn-action" onclick="event.stopPropagation(); startProject('${encodeURIComponent(p.id)}')">Iniciar</button>`;
-
-    tr.innerHTML = `
-      <td><strong>${escapeHtml(p.name)}</strong><br><small class="text-muted">${escapeHtml(p.cwd || '')}</small></td>
-      <td><span class="badge ${typeClass}">${p.type}</span></td>
-      <td>${statusBadge}</td>
-      <td class="ports-cell">${portsHtml}</td>
-      <td class="links-cell">${linksHtml}</td>
-      <td class="actions">
-        ${mainAction}
-        <button class="btn-action" onclick="event.stopPropagation(); openProjectEditModal('${encodeURIComponent(JSON.stringify(p))}')">Editar</button>
-        <button class="btn-secondary" onclick="event.stopPropagation(); openLogsModal('${encodeURIComponent(JSON.stringify(p))}')">Logs</button>
-      </td>
-    `;
-    tbody.appendChild(tr);
   }
+}
+
+function pathBasename(fullPath) {
+  if (!fullPath) return '';
+  const idx = fullPath.lastIndexOf('/');
+  return idx >= 0 ? fullPath.slice(idx + 1) : fullPath;
 }
 
 function escapeHtml(text) {
@@ -474,13 +511,16 @@ window.stopProject = async function (idEncoded) {
 };
 
 window.openProjectEditModal = function (projectEncoded) {
-  const project = JSON.parse(decodeURIComponent(projectEncoded));
-  document.getElementById('project-edit-id').value = project.id;
-  document.getElementById('project-edit-name').value = project.name || '';
-  document.getElementById('project-edit-command').value = project.command || '';
-  document.getElementById('project-edit-cwd').value = project.cwd || '';
-  document.getElementById('project-edit-port').value = project.port || '';
+  const project = projectEncoded ? JSON.parse(decodeURIComponent(projectEncoded)) : null;
+  document.getElementById('project-edit-title').textContent = project ? 'Editar proyecto' : 'Agregar proyecto';
+  document.getElementById('project-edit-id').value = project?.id || '';
+  document.getElementById('project-edit-name').value = project?.name || '';
+  document.getElementById('project-edit-type').value = project?.type || 'node';
+  document.getElementById('project-edit-command').value = project?.command || '';
+  document.getElementById('project-edit-cwd').value = project?.cwd || '';
+  document.getElementById('project-edit-port').value = project?.port || '';
   document.getElementById('project-edit-error').textContent = '';
+  document.getElementById('project-edit-delete').classList.toggle('hidden', !project);
   document.getElementById('project-edit-modal').classList.remove('hidden');
 };
 
@@ -488,9 +528,7 @@ window.openProjectEditModal = function (projectEncoded) {
 const logsModal = document.getElementById('logs-modal');
 const logsPre = document.getElementById('logs-pre');
 const logsStatus = document.getElementById('logs-status');
-let logsWs = null;
-let logsReconnectTimer = null;
-let logsReconnectCount = 0;
+let logsPollTimer = null;
 let logsCurrentProject = null;
 
 function setLogsStatus(text, type) {
@@ -498,66 +536,44 @@ function setLogsStatus(text, type) {
   logsStatus.className = 'logs-status' + (type ? ` logs-status-${type}` : '');
 }
 
-function connectLogsWebSocket(project) {
-  if (logsWs) {
-    logsWs.close();
-    logsWs = null;
-  }
-  if (logsReconnectTimer) {
-    clearTimeout(logsReconnectTimer);
-    logsReconnectTimer = null;
-  }
-  logsReconnectCount = 0;
+async function fetchLogs(project) {
+  const res = await fetch(`/api/projects/${project.id}/logs/poll?tail=500`, {
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const data = await res.json();
+  return data.lines || [];
+}
+
+function startLogsPolling(project) {
+  stopLogsPolling();
   logsCurrentProject = project;
+  setLogsStatus('Conectado', 'connected');
 
-  const protocol = window.location.protocol === 'https:' ? 'wss:' : 'wss:';
-  const host = window.location.host;
-  const url = `${protocol}//${host}/ws/projects/${project.id}/logs`;
-
-  setLogsStatus('Conectando', 'connecting');
-
-  function doConnect() {
+  const poll = async () => {
+    if (!logsCurrentProject || logsCurrentProject.id !== project.id) return;
     try {
-      logsWs = new WebSocket(url);
+      const lines = await fetchLogs(project);
+      logsPre.textContent = lines.join('\n') + '\n';
+      logsPre.scrollTop = logsPre.scrollHeight;
     } catch (err) {
       setLogsStatus('Desconectado', 'disconnected');
-      scheduleReconnect();
-      return;
+      console.error('Logs poll failed:', err);
     }
+  };
 
-    logsWs.onopen = () => {
-      setLogsStatus('Conectado', 'connected');
-      logsReconnectCount = 0;
-    };
+  poll();
+  logsPollTimer = setInterval(poll, 2000);
+}
 
-    logsWs.onmessage = (event) => {
-      logsPre.textContent += event.data + '\n';
-      logsPre.scrollTop = logsPre.scrollHeight;
-    };
-
-    logsWs.onclose = () => {
-      setLogsStatus('Desconectado', 'disconnected');
-      logsWs = null;
-      scheduleReconnect();
-    };
-
-    logsWs.onerror = () => {
-      setLogsStatus('Desconectado', 'disconnected');
-    };
+function stopLogsPolling() {
+  if (logsPollTimer) {
+    clearInterval(logsPollTimer);
+    logsPollTimer = null;
   }
-
-  function scheduleReconnect() {
-    if (logsReconnectCount >= 5) return;
-    if (logsReconnectTimer) return;
-    logsReconnectCount++;
-    logsReconnectTimer = setTimeout(() => {
-      logsReconnectTimer = null;
-      setLogsStatus('Conectando', 'connecting');
-      doConnect();
-    }, 3000);
-  }
-
-  doConnect();
+  logsCurrentProject = null;
+  setLogsStatus('Desconectado', 'disconnected');
 }
 
 window.openLogsModal = function (projectEncoded) {
@@ -565,19 +581,11 @@ window.openLogsModal = function (projectEncoded) {
   document.getElementById('logs-modal-title').textContent = `Logs de ${project.name}`;
   logsPre.textContent = '';
   logsModal.classList.remove('hidden');
-  connectLogsWebSocket(project);
+  startLogsPolling(project);
 };
 
 function closeLogsModal() {
-  if (logsWs) {
-    logsWs.close();
-    logsWs = null;
-  }
-  if (logsReconnectTimer) {
-    clearTimeout(logsReconnectTimer);
-    logsReconnectTimer = null;
-  }
-  logsCurrentProject = null;
+  stopLogsPolling();
   logsModal.classList.add('hidden');
 }
 
@@ -1092,17 +1100,41 @@ projectEditForm.addEventListener('submit', async (e) => {
   const id = document.getElementById('project-edit-id').value;
   const body = {
     name: document.getElementById('project-edit-name').value,
+    type: document.getElementById('project-edit-type').value,
     command: document.getElementById('project-edit-command').value,
     cwd: document.getElementById('project-edit-cwd').value,
-    port: parseInt(document.getElementById('project-edit-port').value, 10),
+    port: parseInt(document.getElementById('project-edit-port').value, 10) || undefined,
   };
   const errorEl = document.getElementById('project-edit-error');
   try {
-    await API.post('/api/projects', { id, ...body });
+    await API.post('/api/projects', { id: id || undefined, ...body });
     projectEditModal.classList.add('hidden');
     refresh();
   } catch (err) {
     errorEl.textContent = err.message;
+  }
+});
+
+document.getElementById('project-edit-delete').addEventListener('click', async () => {
+  const id = document.getElementById('project-edit-id').value;
+  if (!id || !confirm('Eliminar este proyecto del panel? No borra archivos.')) return;
+  try {
+    await API.delete(`/api/projects/${id}`);
+    projectEditModal.classList.add('hidden');
+    refresh();
+  } catch (err) {
+    document.getElementById('project-edit-error').textContent = err.message;
+  }
+});
+
+document.getElementById('projects-add-btn').addEventListener('click', () => openProjectEditModal());
+
+document.getElementById('projects-detect-btn').addEventListener('click', async () => {
+  try {
+    await API.post('/api/projects/detect');
+    refresh();
+  } catch (err) {
+    alert(err.message);
   }
 });
 

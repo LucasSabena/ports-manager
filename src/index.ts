@@ -45,6 +45,7 @@ import {
   saveProjects,
   startProject,
   stopProject,
+  deleteProject,
   getProjectLogs,
   subscribeToLogs,
 } from './projectManager';
@@ -52,6 +53,7 @@ import type { AppConfig, DomainMapping, ProcessDetails, Project } from './types'
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
 const PORT = parseInt(process.env.PORT || '3457', 10);
+const BASE_DOMAIN = process.env.BASE_DOMAIN || 'example.com';
 
 async function loadConfig(): Promise<AppConfig> {
   try {
@@ -72,6 +74,10 @@ async function saveConfig(config: AppConfig): Promise<void> {
 
 function generateId(): string {
   return Math.random().toString(36).substring(2, 15);
+}
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 const app = new Hono();
@@ -151,6 +157,15 @@ app.post('/api/projects', async (c) => {
   return c.json({ success: true, project });
 });
 
+app.delete('/api/projects/:id', async (c) => {
+  const id = c.req.param('id');
+  const result = await deleteProject(id);
+  if (!result.success) {
+    return c.json({ error: result.error }, 404);
+  }
+  return c.json({ success: true });
+});
+
 app.get('/api/projects/:id', async (c) => {
   const id = c.req.param('id');
   const project = getProjectById(id);
@@ -199,6 +214,7 @@ app.get('/api/projects/:id/logs', async (c) => {
   const lines = await getProjectLogs(project, tail);
   return c.json({ lines });
 });
+
 
 app.put('/api/config', async (c) => {
   const body = await c.req.json<Partial<AppConfig['settings']>>();
@@ -385,9 +401,9 @@ app.post('/api/domains/import', async (c) => {
   const ingress = remote.config.config.ingress || [];
   for (const entry of ingress) {
     if (!entry.hostname) continue;
-    if (entry.hostname === 'ports.binaryserver.com.ar') continue;
+    if (entry.hostname === `ports.${BASE_DOMAIN}`) continue;
 
-    const subdomain = entry.hostname.replace(/\.binaryserver\.com\.ar$/, '');
+    const subdomain = entry.hostname.replace(new RegExp(`\\.${escapeRegExp(BASE_DOMAIN)}$`), '');
     const serviceMatch = entry.service.match(/:\/\/localhost:(\d+)/);
     const port = serviceMatch ? parseInt(serviceMatch[1], 10) : 0;
     if (!port) {
@@ -445,7 +461,7 @@ app.post('/api/domains', async (c) => {
     return c.json({ error: 'Invalid subdomain' }, 400);
   }
 
-  const fullDomain = `${clean}.binaryserver.com.ar`;
+  const fullDomain = `${clean}.${BASE_DOMAIN}`;
 
   // Check if already exists
   if (config.domains.some((d) => d.fullDomain === fullDomain)) {
@@ -508,7 +524,7 @@ app.put('/api/domains/:id', async (c) => {
     return c.json({ error: 'Invalid subdomain' }, 400);
   }
 
-  const newFullDomain = `${clean}.binaryserver.com.ar`;
+  const newFullDomain = `${clean}.${BASE_DOMAIN}`;
   if (newFullDomain === domain.fullDomain) {
     return c.json({ success: true, domain });
   }
@@ -590,13 +606,12 @@ app.delete('/api/domains/:id', async (c) => {
 });
 
 app.get('/api/config', async (c) => {
-  const baseDomain = process.env.BASE_DOMAIN || 'example.com';
   return c.json({
     scanIntervalMs: config.settings.scanIntervalMs,
     protectedPids: config.settings.protectedPids,
     protectedPorts: config.settings.protectedPorts,
     ignoredPatterns: config.settings.ignoredPatterns || [],
-    baseDomain,
+    baseDomain: BASE_DOMAIN,
   });
 });
 
@@ -617,44 +632,7 @@ app.onError((err, c) => {
 
 console.log(`Starting ports-manager on port ${PORT}`);
 
-Bun.serve<{ id: string }>({
+export default {
   port: PORT,
-  fetch(request, server) {
-    const url = new URL(request.url);
-    const match = url.pathname.match(/^\/ws\/projects\/([^/]+)\/logs$/);
-    if (match) {
-      const success = server.upgrade(request, { data: { id: match[1] } });
-      if (success) return undefined as any;
-      return new Response('Upgrade required', { status: 426 });
-    }
-    return app.fetch(request, { server });
-  },
-  websocket: {
-    open(ws) {
-      const { id } = ws.data;
-      const project = getProjectById(id);
-      if (!project) {
-        ws.close(1008, 'Project not found');
-        return;
-      }
-      getProjectLogs(project, 100)
-        .then((lines) => {
-          for (const line of lines) {
-            ws.send(line);
-          }
-        })
-        .catch(() => { /* ignore */ });
-      const unsubscribe = subscribeToLogs(id, (line) => {
-        ws.send(line);
-      });
-      (ws as any).unsubscribe = unsubscribe;
-    },
-    message(ws, message) {
-      // Client messages are ignored
-    },
-    close(ws) {
-      const unsubscribe = (ws as any).unsubscribe as (() => void) | undefined;
-      if (unsubscribe) unsubscribe();
-    },
-  },
-});
+  fetch: app.fetch,
+};

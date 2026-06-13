@@ -281,6 +281,20 @@ export async function saveProjects(projects: Project[]): Promise<void> {
   }
 }
 
+export async function deleteProject(id: string): Promise<{ success: boolean; error?: string }> {
+  const project = projectMap.get(id);
+  if (!project) return { success: false, error: 'Project not found' };
+  if (project.running?.pid) {
+    await stopProject(project);
+  }
+  const others = getProjects().filter((p) => p.id !== id);
+  await saveProjects(others);
+  logBuffers.delete(id);
+  logFiles.delete(id);
+  logSubscriptions.delete(id);
+  return { success: true };
+}
+
 export function getProjects(): Project[] {
   syncRunningProjects();
   return Array.from(projectMap.values()).sort((a, b) => a.name.localeCompare(b.name));

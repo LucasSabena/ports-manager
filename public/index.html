@@ -133,7 +133,11 @@
         <section id="tab-projects" class="tab-content">
           <div class="section-header">
             <h2>Proyectos</h2>
-            <span class="last-updated" id="projects-updated"></span>
+            <div class="section-actions">
+              <button id="projects-detect-btn" class="btn-action">Detectar</button>
+              <button id="projects-add-btn" class="btn-primary">+ Agregar</button>
+              <span class="last-updated" id="projects-updated"></span>
+            </div>
           </div>
           <div class="table-wrapper">
             <table id="projects-table">
@@ -185,7 +189,7 @@
         <label>
           Subdominio
           <input type="text" id="domain-input" placeholder="miproyecto" required>
-          <span class="domain-suffix">.<span id="domain-suffix-text">.example.com</span></span>
+          <span class="domain-suffix">.          <span id="domain-suffix-text">example.com</span></span>
         </label>
         <input type="hidden" id="domain-port">
         <input type="hidden" id="domain-type">
@@ -301,11 +305,20 @@
 
   <div id="project-edit-modal" class="modal hidden">
     <div class="modal-content">
-      <h3>Editar proyecto</h3>
+      <h3 id="project-edit-title">Editar proyecto</h3>
       <form id="project-edit-form">
         <label>
           Nombre
           <input type="text" id="project-edit-name" required>
+        </label>
+        <label>
+          Tipo
+          <select id="project-edit-type" required>
+            <option value="node">Node</option>
+            <option value="bun">Bun</option>
+            <option value="python">Python</option>
+            <option value="other">Otro</option>
+          </select>
         </label>
         <label>
           Comando
@@ -317,11 +330,12 @@
         </label>
         <label>
           Puerto esperado
-          <input type="number" id="project-edit-port" min="1" max="65535" required>
+          <input type="number" id="project-edit-port" min="1" max="65535">
         </label>
         <input type="hidden" id="project-edit-id">
         <div id="project-edit-error" class="error"></div>
         <div class="modal-actions">
+          <button type="button" id="project-edit-delete" class="btn-danger hidden">Eliminar</button>
           <button type="button" id="project-edit-cancel" class="btn-secondary">Cancelar</button>
           <button type="submit" class="btn-primary">Guardar</button>
         </div>

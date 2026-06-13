@@ -26,6 +26,8 @@
 ```
 
 > **Click en cualquier fila** abre un modal con Info, Stats en tiempo real, Logs y variables de entorno.
+>
+> **Pestaña Proyectos**: detecta automáticamente proyectos en disco, los agrupa por carpeta, y permite iniciar/detener, ver logs, editar, agregar manualmente o eliminar del panel (sin borrar archivos).
 
 ---
 
@@ -40,9 +42,10 @@
 - 🔒 **Autenticación** por cookie segura con sesiones firmadas.
 - 🛡️ **Sanitización** automática de variables sensibles (tokens, keys, passwords).
 - 📥 **Importación** masiva de dominios existentes desde la configuración remota del túnel de Cloudflare.
-- 📁 **Proyectos**: descubrimiento automático de proyectos en disco, arranque/parada desde el panel, logs en tiempo real vía WebSocket.
+- 📁 **Proyectos**: descubrimiento automático de proyectos en disco, agrupados por carpeta, con arranque/parada, logs vía polling HTTP, edición, agregado manual y eliminación del panel.
 - 🔧 **Configuración editable** desde la UI.
 - 🔗 **Links local y network** para cada servicio.
+- 🌐 **Dominio genérico**: funciona con cualquier dominio mediante `BASE_DOMAIN`.
 
 ---
 
@@ -229,11 +232,14 @@ Si ya tenés subdominios creados manualmente en Cloudflare, andá a la pestaña 
 
 ### Gestión de proyectos
 
-La pestaña **Proyectos** descubre automáticamente directorios con `package.json` o `requirements.txt`. Desde allí podés:
+La pestaña **Proyectos** descubre automáticamente directorios con `package.json` o `requirements.txt`, los agrupa por carpeta padre y permite:
 
+- **Detectar** proyectos nuevos (`POST /api/projects/detect`).
+- **Agregar** un proyecto manualmente.
 - **Iniciar** un proyecto (`POST /api/projects/:id/start`).
 - **Detener** un proyecto (`POST /api/projects/:id/stop`).
-- Ver **logs en vivo** vía WebSocket (`/ws/projects/:id/logs`).
+- Ver **logs en vivo** vía polling HTTP (`GET /api/projects/:id/logs?tail=N`).
+- **Editar** o **eliminar** del panel (sin borrar archivos).
 - Ver links **Local** (`http://localhost:<port>`) y **Network** (`http://<ip>:<port>`).
 
 ---
@@ -250,8 +256,9 @@ La pestaña **Proyectos** descubre automáticamente directorios con `package.jso
 ## 🛣️ Roadmap
 
 - [x] Soporte para editar configuración desde la UI.
-- [x] Histórico de logs con WebSocket.
+- [x] Histórico de logs con polling HTTP.
 - [x] Arrancar/parar proyectos desde el panel.
+- [x] Proyectos agrupados por carpeta con detección, edición y eliminación.
 - [ ] Soporte multi-usuario con roles.
 - [ ] Tests automatizados.
 
