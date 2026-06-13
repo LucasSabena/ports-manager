@@ -136,6 +136,46 @@ function pickScript(scripts: Record<string, string> | undefined, preferred?: str
   return Object.keys(scripts)[0];
 }
 
+function withHostBinding(command: string, framework: string): string {
+  if (command.includes('--host') || command.includes('--hostname') || command.includes('HOST=0.0.0.0')) {
+    return command;
+  }
+
+  if (framework === 'next') {
+    return `${command} -- --hostname 0.0.0.0`;
+  }
+
+  if (framework === 'react-scripts') {
+    return `HOST=0.0.0.0 ${command}`;
+  }
+
+  if (framework === 'node' || framework === 'bun' || framework === 'vite' || framework === 'nuxt' || framework === 'astro' || framework === 'sveltekit' || framework === 'unknown') {
+    return `${command} -- --host 0.0.0.0`;
+  }
+
+  return command;
+}
+
+export function bindProjectCommandToNetwork(project: Project, command: string): string {
+  if (!command) return command;
+  if (command.includes('--host') || command.includes('--hostname') || command.includes('HOST=0.0.0.0')) {
+    return command;
+  }
+
+  const pkg = readJsonFileSync<{ dependencies?: Record<string, string>; devDependencies?: Record<string, string> }>(path.join(project.cwd, 'package.json'));
+  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
+
+  if (deps['next']) {
+    return `${command} -- --hostname 0.0.0.0`;
+  }
+
+  if (deps['react-scripts']) {
+    return `HOST=0.0.0.0 ${command}`;
+  }
+
+  return `${command} -- --host 0.0.0.0`;
+}
+
 export function inferCommandForProject(project: Project): string | undefined {
   if (project.type === 'python') {
     if (pathExistsSync(path.join(project.cwd, 'app.py'))) return 'python app.py';
@@ -171,22 +211,42 @@ export function inferCommandForProject(project: Project): string | undefined {
     }
   }
 
+  let framework = 'unknown';
   const preferred: string[] = [];
-  if (deps['next']) preferred.push('dev', 'start', 'build');
-  else if (deps['nuxt'] || deps['nuxt3']) preferred.push('dev', 'start', 'build');
-  else if (deps['astro']) preferred.push('dev', 'start', 'build');
-  else if (deps['@sveltejs/kit']) preferred.push('dev', 'start', 'build');
-  else if (deps['vite']) preferred.push('dev', 'start', 'build');
-  else if (deps['react-scripts']) preferred.push('start', 'dev', 'build');
-  else preferred.push('dev', 'start', 'serve');
+  if (deps['next']) {
+    framework = 'next';
+    preferred.push('dev', 'start', 'build');
+  } else if (deps['nuxt'] || deps['nuxt3']) {
+    framework = 'nuxt';
+    preferred.push('dev', 'start', 'build');
+  } else if (deps['astro']) {
+    framework = 'astro';
+    preferred.push('dev', 'start', 'build');
+  } else if (deps['@sveltejs/kit']) {
+    framework = 'sveltekit';
+    preferred.push('dev', 'start', 'build');
+  } else if (deps['vite']) {
+    framework = 'vite';
+    preferred.push('dev', 'start', 'build');
+  } else if (deps['react-scripts']) {
+    framework = 'react-scripts';
+    preferred.push('start', 'dev', 'build');
+  } else {
+    preferred.push('dev', 'start', 'serve');
+  }
 
   const script = pickScript(scripts, preferred);
   if (!script) return undefined;
 
-  if (pm === 'bun') return `bun run ${script}`;
-  if (pm === 'pnpm') return `pnpm run ${script}`;
-  if (pm === 'yarn') return `yarn ${script}`;
-  return `npm run ${script}`;
+  const base = pm === 'bun'
+    ? `bun run ${script}`
+    : pm === 'pnpm'
+      ? `pnpm run ${script}`
+      : pm === 'yarn'
+        ? `yarn ${script}`
+        : `npm run ${script}`;
+
+  return withHostBinding(base, framework);
 }
 
 function detectInstallCommand(cwd: string, packageManager: Project['packageManager']): string {
@@ -664,6 +724,10 @@ export async function startProject(
   let command = commandOverride || (project.autoDetect ? inferCommandForProject(project) : project.command);
   if (!command) {
     command = inferCommandForProject(project);
+  }
+
+  if (command) {
+    command = bindProjectCommandToNetwork(project, command);
   }
 
   if (!command) {

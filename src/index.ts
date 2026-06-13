@@ -39,6 +39,7 @@ import {
 import { getServerStats } from './stats';
 import {
   initProjectManager,
+  bindProjectCommandToNetwork,
   getProjects,
   getProjectById,
   inferCommandForProject,
@@ -119,7 +120,8 @@ app.get('/api/projects', async (c) => {
   const projects = getProjects();
   const enriched = await Promise.all(
     projects.map(async (p) => {
-      const command = p.autoDetect ? inferCommandForProject(p) || p.command : p.command;
+      const inferred = p.autoDetect ? inferCommandForProject(p) || p.command : p.command;
+      const command = inferred ? bindProjectCommandToNetwork(p, inferred) : inferred;
       const nodeModulesPath = path.join(p.cwd, 'node_modules');
       let needsInstall = false;
       try {
