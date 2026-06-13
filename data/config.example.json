@@ -1,0 +1,36 @@
+{
+  "auth": {
+    "username": "admin",
+    "passwordHash": "GENERATED_ON_FIRST_RUN"
+  },
+  "domains": [
+    {
+      "id": "example-001",
+      "subdomain": "app1",
+      "fullDomain": "app1.example.com",
+      "target": "http://localhost:3000",
+      "port": 3000,
+      "projectName": "my-app",
+      "processType": "process",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "dnsRecordId": "fake-dns-record-id-001"
+    },
+    {
+      "id": "example-002",
+      "subdomain": "app2",
+      "fullDomain": "app2.example.com",
+      "target": "http://localhost:8080",
+      "port": 8080,
+      "projectName": "my-docker-app",
+      "processType": "docker",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "dnsRecordId": "fake-dns-record-id-002"
+    }
+  ],
+  "settings": {
+    "scanIntervalMs": 5000,
+    "protectedPids": [1],
+    "protectedPorts": [22, 80, 443],
+    "ignoredPatterns": []
+  }
+}

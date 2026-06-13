@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
+  <title>Ports Manager</title>
+  <link rel="stylesheet" href="/style.v2.css">
+</head>
+<body>
+  <div id="app">
+    <div id="login-screen" class="screen">
+      <div class="login-box">
+        <h1>Ports Manager</h1>
+        <p>Gestión de proyectos de desarrollo y subdominios</p>
+        <form id="login-form">
+          <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
+          <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
+          <button type="submit">Ingresar</button>
+          <div id="login-error" class="error"></div>
+        </form>
+      </div>
+    </div>
+
+    <div id="main-screen" class="screen hidden">
+      <header>
+        <h1>Ports Manager</h1>
+        <div id="server-stats" class="server-stats">
+          <div class="stat" title="CPU">
+            <span class="stat-label">CPU</span>
+            <span class="stat-value" id="stat-cpu">-</span>
+          </div>
+          <div class="stat" title="RAM">
+            <span class="stat-label">RAM</span>
+            <span class="stat-value" id="stat-ram">-</span>
+          </div>
+          <div class="stat" title="Disco">
+            <span class="stat-label">DISK</span>
+            <span class="stat-value" id="stat-disk">-</span>
+          </div>
+          <div class="stat" title="Load average">
+            <span class="stat-label">LOAD</span>
+            <span class="stat-value" id="stat-load">-</span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <span id="user-name"></span>
+          <button id="logout-btn" class="btn-secondary">Salir</button>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab-btn active" data-tab="processes">Desarrollo</button>
+        <button class="tab-btn" data-tab="system">Sistema</button>
+        <button class="tab-btn" data-tab="docker">Docker</button>
+        <button class="tab-btn" data-tab="domains">Dominios</button>
+      </nav>
+
+      <main>
+        <section id="tab-processes" class="tab-content active">
+          <div class="section-header">
+            <h2>Proyectos de desarrollo</h2>
+            <span class="last-updated" id="processes-updated"></span>
+          </div>
+          <div class="table-wrapper">
+            <table id="processes-table">
+              <thead>
+                <tr>
+                  <th>Proyecto</th>
+                  <th>Tipo</th>
+                  <th>PID</th>
+                  <th>Puerto(s)</th>
+                  <th>Comando</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="processes-empty" class="empty-state hidden">No hay proyectos de desarrollo corriendo</div>
+        </section>
+
+        <section id="tab-system" class="tab-content">
+          <div class="section-header">
+            <h2>Todos los procesos con puerto abierto</h2>
+            <span class="last-updated" id="system-updated"></span>
+          </div>
+          <div class="table-wrapper">
+            <table id="system-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Tipo</th>
+                  <th>PID</th>
+                  <th>Puerto(s)</th>
+                  <th>Comando</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="system-empty" class="empty-state hidden">No hay procesos con puertos abiertos</div>
+        </section>
+
+        <section id="tab-docker" class="tab-content">
+          <div class="section-header">
+            <h2>Contenedores Docker</h2>
+            <span class="last-updated" id="docker-updated"></span>
+          </div>
+          <div class="table-wrapper">
+            <table id="docker-table">
+              <thead>
+                <tr>
+                  <th>Nombre</th>
+                  <th>Tipo</th>
+                  <th>ID</th>
+                  <th>Puertos</th>
+                  <th>Imagen / Estado</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="docker-empty" class="empty-state hidden">No hay contenedores Docker corriendo</div>
+        </section>
+
+        <section id="tab-domains" class="tab-content">
+          <div class="section-header">
+            <h2>Dominios asignados</h2>
+          </div>
+          <div class="table-wrapper">
+            <table id="domains-table">
+              <thead>
+                <tr>
+                  <th>Dominio</th>
+                  <th>Proyecto</th>
+                  <th>Target</th>
+                  <th>Creado</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div id="domains-empty" class="empty-state hidden">No hay dominios asignados</div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div id="domain-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Asignar subdominio</h3>
+      <p id="domain-modal-info"></p>
+      <form id="domain-form">
+        <label>
+          Subdominio
+          <input type="text" id="domain-input" placeholder="miproyecto" required>
+          <span class="domain-suffix">.binaryserver.com.ar</span>
+        </label>
+        <input type="hidden" id="domain-port">
+        <input type="hidden" id="domain-type">
+        <input type="hidden" id="domain-project">
+        <input type="hidden" id="domain-id">
+        <div id="domain-error" class="error"></div>
+        <div class="modal-actions">
+          <button type="button" id="domain-cancel" class="btn-secondary">Cancelar</button>
+          <button type="submit" class="btn-primary">Asignar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div id="kill-modal" class="modal hidden">
+    <div class="modal-content">
+      <h3>Confirmar kill</h3>
+      <p id="kill-modal-info"></p>
+      <div id="kill-error" class="error"></div>
+      <div class="modal-actions">
+        <button type="button" id="kill-cancel" class="btn-secondary">Cancelar</button>
+        <button type="button" id="kill-confirm" class="btn-danger">Matar proceso</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="detail-modal" class="modal hidden">
+    <div class="modal-content detail-modal-content">
+      <div class="detail-header">
+        <div>
+          <h3 id="detail-title">Proyecto</h3>
+          <div id="detail-meta" class="detail-meta"></div>
+        </div>
+        <div class="detail-actions">
+          <button id="detail-domain-btn" class="btn-action">Dominio</button>
+          <button id="detail-kill-btn" class="btn-danger">Kill</button>
+          <button id="detail-close" class="btn-secondary">Cerrar</button>
+        </div>
+      </div>
+
+      <div class="detail-tabs">
+        <button class="detail-tab-btn active" data-detail-tab="info">Info</button>
+        <button class="detail-tab-btn" data-detail-tab="stats">Stats</button>
+        <button class="detail-tab-btn" data-detail-tab="logs">Logs</button>
+        <button class="detail-tab-btn" data-detail-tab="env">Env</button>
+      </div>
+
+      <div id="detail-tab-info" class="detail-tab-content active">
+        <dl class="detail-grid">
+          <div><dt id="detail-label-cwd">CWD</dt><dd id="detail-cwd">-</dd></div>
+          <div><dt id="detail-label-working-dir">Directorio de trabajo</dt><dd id="detail-working-dir">-</dd></div>
+          <div><dt id="detail-label-ppid">PPID</dt><dd id="detail-ppid">-</dd></div>
+          <div><dt id="detail-label-start">Inicio</dt><dd id="detail-start">-</dd></div>
+          <div><dt id="detail-label-runtime">Tipo de runtime</dt><dd id="detail-runtime">-</dd></div>
+        </dl>
+        <div class="detail-full">
+          <dt id="detail-label-cmd">Comando completo</dt>
+          <dd id="detail-cmd" class="cmd-box">-</dd>
+        </div>
+      </div>
+
+        <div id="detail-tab-stats" class="detail-tab-content">
+        <div class="stats-grid">
+          <div class="stat-card"><span class="stat-label" id="detail-stats-label-cpu">CPU</span><span class="stat-value" id="detail-stats-cpu">-</span></div>
+          <div class="stat-card"><span class="stat-label" id="detail-stats-label-memory">Memoria</span><span class="stat-value" id="detail-stats-memory">-</span></div>
+          <div class="stat-card"><span class="stat-label" id="detail-stats-label-uptime">Uptime</span><span class="stat-value" id="detail-stats-uptime">-</span></div>
+          <div class="stat-card"><span class="stat-label" id="detail-stats-label-threads">Threads</span><span class="stat-value" id="detail-stats-threads">-</span></div>
+        </div>
+      </div>
+
+      <div id="detail-tab-logs" class="detail-tab-content">
+        <div class="logs-toolbar">
+          <select id="detail-logs-source" class="hidden"></select>
+          <button id="detail-logs-reload" class="btn-secondary">Recargar</button>
+        </div>
+        <div id="detail-logs-empty" class="empty-state hidden">No se detectaron fuentes de logs.</div>
+        <pre id="detail-logs-pre" class="log-box">Selecciona una fuente y presiona Recargar.</pre>
+      </div>
+
+      <div id="detail-tab-env" class="detail-tab-content">
+        <input type="text" id="detail-env-filter" placeholder="Filtrar variables...">
+        <div class="table-wrapper">
+          <table id="detail-env-table">
+            <thead>
+              <tr><th>Variable</th><th>Valor</th></tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.v2.js"></script>
+</body>
+</html>
