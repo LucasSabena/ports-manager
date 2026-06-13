@@ -1,9 +1,9 @@
 import { $ } from 'bun';
 import { readdir, readFile, stat, mkdir, unlink } from 'fs/promises';
-import { createWriteStream, readFileSync } from 'fs';
+import { createWriteStream, readFileSync, statSync } from 'fs';
 import * as path from 'path';
 import type { AppConfig, Project } from './types';
-import { getListeningPorts, getProcessListeningPorts, getServerIp } from './detector';
+import { detectProcesses, getListeningPorts, getProcessListeningPorts, getServerIp } from './detector';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
 const LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
@@ -119,10 +119,10 @@ function detectPackageManager(cwd: string, files: string[]): Project['packageMan
   return 'npm';
 }
 
-function pickScript(scripts: Record<string, string> | undefined): string | undefined {
+function pickScript(scripts: Record<string, string> | undefined, preferred?: string[]): string | undefined {
   if (!scripts) return undefined;
-  const preferred = ['dev', 'start', 'serve'];
-  for (const name of preferred) {
+  const order = preferred && preferred.length > 0 ? preferred : ['dev', 'start', 'serve'];
+  for (const name of order) {
     if (scripts[name]) return name;
   }
   return Object.keys(scripts)[0];
@@ -296,7 +296,7 @@ export async function deleteProject(id: string): Promise<{ success: boolean; err
 }
 
 export function getProjects(): Project[] {
-  syncRunningProjects();
+  syncRunningProjectsWithProcesses();
   return Array.from(projectMap.values()).sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -304,8 +304,51 @@ export function getRunningProjects(): Project[] {
   return getProjects().filter((p) => p.running);
 }
 
+export function inferCommandForProject(project: Project): string | undefined {
+  if (project.type === 'python') {
+    if (pathExistsSync(path.join(project.cwd, 'app.py'))) return 'python app.py';
+    if (pathExistsSync(path.join(project.cwd, 'main.py'))) return 'python main.py';
+    return undefined;
+  }
+
+  const pkg = readJsonFileSync<{ scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }>(path.join(project.cwd, 'package.json'));
+  if (!pkg) return undefined;
+
+  const scripts = pkg.scripts || {};
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+  // Framework-aware preferred script order
+  const preferred: string[] = [];
+  if (deps['next']) preferred.push('dev', 'start', 'build');
+  else if (deps['nuxt'] || deps['nuxt3']) preferred.push('dev', 'start', 'build');
+  else if (deps['astro']) preferred.push('dev', 'start', 'build');
+  else if (deps['@sveltejs/kit']) preferred.push('dev', 'start', 'build');
+  else if (deps['vite']) preferred.push('dev', 'start', 'build');
+  else if (deps['react-scripts']) preferred.push('start', 'dev', 'build');
+  else preferred.push('dev', 'start', 'serve');
+
+  const script = pickScript(scripts, preferred);
+  if (!script) return undefined;
+
+  // Prefer the package manager used by the project
+  const pm = project.packageManager || 'npm';
+  if (pm === 'bun') return `bun run ${script}`;
+  if (pm === 'pnpm') return `pnpm run ${script}`;
+  if (pm === 'yarn') return `yarn ${script}`;
+  return `npm run ${script}`;
+}
+
+function pathExistsSync(p: string): boolean {
+  try {
+    statSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function getProjectById(id: string): Project | undefined {
-  syncRunningProjects();
+  syncRunningProjectsWithProcesses().catch(() => { /* ignore */ });
   return projectMap.get(id);
 }
 
@@ -318,19 +361,87 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
-function syncRunningProjects(): void {
+function normalizeCwd(cwd: string): string[] {
+  const resolved = path.resolve(cwd);
+  const alternatives: string[] = [resolved];
+
+  // Host path seen from container via /proc may be /home/<user>/Proyectos
+  // while projects scanned inside container are /host/Proyectos
+  if (resolved.startsWith('/home/')) {
+    const rest = resolved.slice('/home/'.length);
+    const slashIdx = rest.indexOf('/');
+    if (slashIdx >= 0) {
+      alternatives.push(path.resolve('/host' + rest.slice(slashIdx)));
+    }
+  }
+  if (resolved.startsWith('/host/')) {
+    alternatives.push(path.resolve('/home/binary' + resolved.slice('/host'.length)));
+    alternatives.push(path.resolve('/home/ubuntu' + resolved.slice('/host'.length)));
+    alternatives.push(path.resolve('/home/user' + resolved.slice('/host'.length)));
+  }
+
+  return [...new Set(alternatives)];
+}
+
+async function syncRunningProjectsWithProcesses(): Promise<void> {
+  const processes = await detectProcesses();
+  const portsByCwd = new Map<string, { pid: number; ports: number[] }>();
+
+  for (const p of processes) {
+    if (p.type !== 'node' && p.type !== 'bun' && p.type !== 'python') continue;
+    for (const cwd of normalizeCwd(p.cwd)) {
+      const existing = portsByCwd.get(cwd);
+      if (existing) {
+        for (const port of p.ports) {
+          if (!existing.ports.includes(port)) existing.ports.push(port);
+        }
+      } else {
+        portsByCwd.set(cwd, { pid: p.pid, ports: [...p.ports] });
+      }
+    }
+  }
+
   let changed = false;
   for (const project of projectMap.values()) {
+    const projectCwds = normalizeCwd(project.cwd);
+    let live: { pid: number; ports: number[] } | undefined;
+    for (const projectCwd of projectCwds) {
+      live = portsByCwd.get(projectCwd);
+      if (live) break;
+    }
+
+    if (live) {
+      if (!project.running || project.running.pid !== live.pid || JSON.stringify(project.running.ports) !== JSON.stringify(live.ports)) {
+        project.running = {
+          pid: live.pid,
+          ports: live.ports,
+          startedAt: project.running?.startedAt || new Date().toISOString(),
+        };
+        if (!project.command) {
+          const inferred = inferCommandForProject(project);
+          if (inferred) project.command = inferred;
+        }
+        changed = true;
+      }
+      continue;
+    }
+
     if (project.running?.pid && !isProcessAlive(project.running.pid)) {
       delete project.running;
       runningHandles.delete(project.id);
       changed = true;
     }
   }
+
   if (changed && appConfig && saveConfigFn) {
     appConfig.projects = Array.from(projectMap.values());
     saveConfigFn(appConfig).catch(() => { /* ignore */ });
   }
+}
+
+function syncRunningProjects(): void {
+  // Kept for callers that already expect sync behavior
+  syncRunningProjectsWithProcesses().catch(() => { /* ignore */ });
 }
 
 async function ensureLogDir(): Promise<void> {
@@ -476,9 +587,7 @@ export async function startProject(
 
   let command = commandOverride || project.command;
   if (!command) {
-    if ((project.type === 'node' || project.type === 'bun')) {
-      command = buildBunCommand(project.cwd) || (project.packageManager && buildNodeCommand(project.cwd, project.packageManager));
-    }
+    command = inferCommandForProject(project);
   }
 
   if (!command) {
