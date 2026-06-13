@@ -714,6 +714,11 @@ tbody tr:last-child td { border-bottom: none; }
   min-height: 300px;
 }
 
+.start-modal-content {
+  max-width: 900px;
+  width: 90vw;
+}
+
 /* Settings modal */
 #settings-form textarea,
 #settings-form input[type="number"],

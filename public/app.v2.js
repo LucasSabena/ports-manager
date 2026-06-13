@@ -498,37 +498,122 @@ document.querySelector('#docker-table tbody').addEventListener('click', handleRo
 document.querySelector('#projects-table tbody').addEventListener('click', handleRowClick);
 
 // Project actions
+const startModal = document.getElementById('start-modal');
+const startPre = document.getElementById('start-pre');
+const startStatus = document.getElementById('start-status');
+const startInstallBtn = document.getElementById('start-install');
+let startPollTimer = null;
+let startCurrentProject = null;
+
+function setStartStatus(text, type) {
+  startStatus.textContent = text;
+  startStatus.className = 'logs-status' + (type ? ` logs-status-${type}` : '');
+}
+
+function appendStartLine(line) {
+  startPre.textContent += line + '\n';
+  startPre.scrollTop = startPre.scrollHeight;
+}
+
+function stopStartPolling() {
+  if (startPollTimer) {
+    clearInterval(startPollTimer);
+    startPollTimer = null;
+  }
+  startCurrentProject = null;
+}
+
+function closeStartModal() {
+  stopStartPolling();
+  startModal.classList.add('hidden');
+}
+
+function resetStartPolling() {
+  if (startPollTimer) {
+    clearInterval(startPollTimer);
+    startPollTimer = null;
+  }
+}
+
+async function pollStartLogs(project) {
+  try {
+    const lines = await fetchLogs(project);
+    startPre.textContent = lines.join('\n') + '\n';
+    startPre.scrollTop = startPre.scrollHeight;
+  } catch (err) {
+    appendStartLine(`Error leyendo logs: ${err.message}`);
+  }
+}
+
+function openStartModal(project, title) {
+  startCurrentProject = project;
+  startPre.textContent = '';
+  startInstallBtn.classList.add('hidden');
+  document.getElementById('start-modal-title').textContent = title || `Iniciando ${project.name}`;
+  setStartStatus('Preparando', 'connecting');
+  startModal.classList.remove('hidden');
+}
+
 window.startProject = async function (idEncoded) {
   const id = decodeURIComponent(idEncoded);
+  const project = cachedProjects.find((p) => p.id === id) || { id, name: id };
+  openStartModal(project, `Iniciando ${project.name || id}`);
+  appendStartLine(`$ ${project.command || 'start'}`);
   try {
+    resetStartPolling();
     const res = await API.post(`/api/projects/${id}/start`);
-    refresh();
-    if (res.success && res.error) {
-      alert(res.error);
-    }
-    if (!res.success && res.installCommand) {
-      const confirmed = confirm(`${res.error}\n\n¿Querés ejecutar "${res.installCommand}" ahora?`);
-      if (confirmed) {
-        await installProject(encodeURIComponent(id));
+    if (!res.success) {
+      setStartStatus('Error', 'disconnected');
+      appendStartLine(res.error || 'No se pudo iniciar');
+      if (res.installCommand) {
+        startInstallBtn.textContent = `Instalar (${res.installCommand})`;
+        startInstallBtn.classList.remove('hidden');
+        startInstallBtn.onclick = () => installProject(encodeURIComponent(id), true, res.installCommand);
       }
-    }
-  } catch (err) {
-    const installCommand = err?.data?.installCommand;
-    if (installCommand) {
-      const confirmed = confirm(`${err.message}\n\n¿Querés ejecutar "${installCommand}" ahora?`);
-      if (confirmed) await installProject(encodeURIComponent(id));
       return;
     }
-    alert(err.message);
+    appendStartLine(res.error || 'Proceso iniciado');
+    setStartStatus('Arrancando', 'connected');
+    refresh();
+    pollStartLogs(project);
+    startPollTimer = setInterval(() => {
+      if (!startCurrentProject) return;
+      pollStartLogs(project);
+    }, 2000);
+    setTimeout(async () => {
+      try {
+        const { projects } = await API.get('/api/projects');
+        const updated = projects.find((p) => p.id === id);
+        if (updated?.running) {
+          setStartStatus(`Corriendo en ${updated.running.ports?.join(', ') || 'puerto pendiente'}`, 'connected');
+          appendStartLine(`Listo: ${updated.running.ports?.length ? updated.running.ports.join(', ') : 'detectando puerto...'}`);
+        }
+      } catch { /* ignore */ }
+    }, 1500);
+  } catch (err) {
+    const installCommand = err?.data?.installCommand;
+    setStartStatus('Error', 'disconnected');
+    appendStartLine(err.message);
+    if (installCommand) {
+      startInstallBtn.textContent = `Instalar (${installCommand})`;
+      startInstallBtn.classList.remove('hidden');
+      startInstallBtn.onclick = () => installProject(encodeURIComponent(id), true, installCommand);
+      return;
+    }
+    appendStartLine(err.message);
   }
 };
 
-window.installProject = async function (idEncoded) {
+window.installProject = async function (idEncoded, fromStartModal = false, forcedCommand = '') {
   const id = decodeURIComponent(idEncoded);
   try {
     const res = await API.post(`/api/projects/${id}/install`);
     if (res.success) {
       alert(`Dependencias instaladas con ${res.command}.\n\nAhora podés iniciar el proyecto.`);
+      if (fromStartModal) {
+        startInstallBtn.classList.add('hidden');
+        appendStartLine(`Dependencias instaladas con ${res.command}`);
+      }
     } else {
       alert(`Error instalando dependencias:\n${res.error}\n\nComando: ${res.command}`);
     }
@@ -634,6 +719,15 @@ document.getElementById('logs-clear').addEventListener('click', () => {
 });
 logsModal.addEventListener('click', (e) => {
   if (e.target === logsModal) closeLogsModal();
+});
+
+document.getElementById('start-close').addEventListener('click', closeStartModal);
+startInstallBtn.addEventListener('click', async () => {
+  if (!startCurrentProject) return;
+  await installProject(encodeURIComponent(startCurrentProject.id), true);
+});
+startModal.addEventListener('click', (e) => {
+  if (e.target === startModal) closeStartModal();
 });
 
 // Kill modal
