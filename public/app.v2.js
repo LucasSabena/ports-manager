@@ -9,7 +9,12 @@ const API = {
       credentials: 'same-origin',
     });
     const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+    if (!res.ok) {
+      const err = new Error(data.error || `HTTP ${res.status}`);
+      err.data = data;
+      err.status = res.status;
+      throw err;
+    }
     return data;
   },
   get(path) { return this.request(path); },
@@ -445,6 +450,9 @@ function renderProjects(projects, domains) {
       const mainAction = isRunning
         ? `<button class="btn-danger" onclick="event.stopPropagation(); stopProject('${encodeURIComponent(p.id)}')">Detener</button>`
         : `<button class="btn-action" onclick="event.stopPropagation(); startProject('${encodeURIComponent(p.id)}')">Iniciar</button>`;
+      const installBtn = !isRunning && p.needsInstall
+        ? `<button class="btn-warning" onclick="event.stopPropagation(); installProject('${encodeURIComponent(p.id)}')">Instalar</button>`
+        : '';
 
       const projectJson = encodeURIComponent(JSON.stringify(p));
       tr.innerHTML = `
@@ -455,6 +463,7 @@ function renderProjects(projects, domains) {
         <td class="links-cell">${linksHtml}</td>
         <td class="actions">
           ${mainAction}
+          ${installBtn}
           <button class="btn-action" onclick="event.stopPropagation(); openProjectEditModal('${projectJson}')">Editar</button>
           <button class="btn-secondary" onclick="event.stopPropagation(); openLogsModal('${projectJson}')">Logs</button>
         </td>
@@ -492,7 +501,37 @@ document.querySelector('#projects-table tbody').addEventListener('click', handle
 window.startProject = async function (idEncoded) {
   const id = decodeURIComponent(idEncoded);
   try {
-    await API.post(`/api/projects/${id}/start`);
+    const res = await API.post(`/api/projects/${id}/start`);
+    refresh();
+    if (res.success && res.error) {
+      alert(res.error);
+    }
+    if (!res.success && res.installCommand) {
+      const confirmed = confirm(`${res.error}\n\n¿Querés ejecutar "${res.installCommand}" ahora?`);
+      if (confirmed) {
+        await installProject(encodeURIComponent(id));
+      }
+    }
+  } catch (err) {
+    const installCommand = err?.data?.installCommand;
+    if (installCommand) {
+      const confirmed = confirm(`${err.message}\n\n¿Querés ejecutar "${installCommand}" ahora?`);
+      if (confirmed) await installProject(encodeURIComponent(id));
+      return;
+    }
+    alert(err.message);
+  }
+};
+
+window.installProject = async function (idEncoded) {
+  const id = decodeURIComponent(idEncoded);
+  try {
+    const res = await API.post(`/api/projects/${id}/install`);
+    if (res.success) {
+      alert(`Dependencias instaladas con ${res.command}.\n\nAhora podés iniciar el proyecto.`);
+    } else {
+      alert(`Error instalando dependencias:\n${res.error}\n\nComando: ${res.command}`);
+    }
     refresh();
   } catch (err) {
     alert(err.message);

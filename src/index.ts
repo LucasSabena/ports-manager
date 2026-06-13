@@ -1,7 +1,8 @@
 import { Hono } from 'hono';
 import { serveStatic } from 'hono/bun';
 import { $ } from 'bun';
-import { readFile, writeFile } from 'fs/promises';
+import { readFile, writeFile, readdir } from 'fs/promises';
+import * as path from 'path';
 import {
   detectProcesses,
   detectDockerContainers,
@@ -40,12 +41,14 @@ import {
   initProjectManager,
   getProjects,
   getProjectById,
+  inferCommandForProject,
   loadProjects,
   detectProjectsFromDisk,
   saveProjects,
   startProject,
   stopProject,
   deleteProject,
+  installProjectDependencies,
   getProjectLogs,
   subscribeToLogs,
 } from './projectManager';
@@ -113,7 +116,22 @@ app.get('/api/me', async (c) => {
 app.use('/api/*', requireAuth);
 
 app.get('/api/projects', async (c) => {
-  return c.json({ projects: getProjects() });
+  const projects = getProjects();
+  const enriched = await Promise.all(
+    projects.map(async (p) => {
+      const command = p.autoDetect ? inferCommandForProject(p) || p.command : p.command;
+      const nodeModulesPath = path.join(p.cwd, 'node_modules');
+      let needsInstall = false;
+      try {
+        const entries = await readdir(nodeModulesPath);
+        needsInstall = entries.length === 0;
+      } catch {
+        needsInstall = true;
+      }
+      return { ...p, command, needsInstall };
+    })
+  );
+  return c.json({ projects: enriched });
 });
 
 app.post('/api/projects/detect', async (c) => {
@@ -191,6 +209,19 @@ app.post('/api/projects/:id/start', async (c) => {
     }
   } catch { /* optional body */ }
   const result = await startProject(project, command);
+  if (result.installCommand && !result.success) {
+    return c.json({ success: false, error: result.error, installCommand: result.installCommand }, 409);
+  }
+  return c.json(result);
+});
+
+app.post('/api/projects/:id/install', async (c) => {
+  const id = c.req.param('id');
+  const project = getProjectById(id);
+  if (!project) {
+    return c.json({ error: 'Project not found' }, 404);
+  }
+  const result = await installProjectDependencies(project);
   return c.json(result);
 });
 

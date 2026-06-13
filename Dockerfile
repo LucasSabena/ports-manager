@@ -22,6 +22,9 @@ RUN install -m 0755 -d /etc/apt/keyrings \
 # Install Node.js (needed to run Next.js/Vite projects launched from the panel)
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && corepack enable \
+    && corepack prepare pnpm@latest --activate \
+    && corepack prepare yarn@stable --activate \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

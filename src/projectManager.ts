@@ -112,6 +112,14 @@ function readJsonFileSync<T>(p: string): T | null {
 }
 
 function detectPackageManager(cwd: string, files: string[]): Project['packageManager'] {
+  const pkg = readJsonFileSync<{ packageManager?: string }>(path.join(cwd, 'package.json'));
+  const pmField = pkg?.packageManager;
+  if (pmField) {
+    if (pmField.startsWith('pnpm')) return 'pnpm';
+    if (pmField.startsWith('yarn')) return 'yarn';
+    if (pmField.startsWith('bun')) return 'bun';
+    if (pmField.startsWith('npm')) return 'npm';
+  }
   if (files.includes('pnpm-lock.yaml')) return 'pnpm';
   if (files.includes('yarn.lock')) return 'yarn';
   if (files.includes('bun.lock') || files.includes('bun.lockb')) return 'bun';
@@ -128,22 +136,81 @@ function pickScript(scripts: Record<string, string> | undefined, preferred?: str
   return Object.keys(scripts)[0];
 }
 
-function buildBunCommand(cwd: string): string | undefined {
-  const pkg = readJsonFileSync<{ scripts?: Record<string, string> }>(path.join(cwd, 'package.json'));
+export function inferCommandForProject(project: Project): string | undefined {
+  if (project.type === 'python') {
+    if (pathExistsSync(path.join(project.cwd, 'app.py'))) return 'python app.py';
+    if (pathExistsSync(path.join(project.cwd, 'main.py'))) return 'python main.py';
+    return undefined;
+  }
+
+  const pkg = readJsonFileSync<{ scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string>; packageManager?: string }>(path.join(project.cwd, 'package.json'));
   if (!pkg) return undefined;
-  const script = pickScript(pkg.scripts);
+
+  const scripts = pkg.scripts || {};
+  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
+
+  // Prefer the package manager declared in package.json, then the project/lockfile-derived one, fallback npm
+  let pm = project.packageManager || 'npm';
+  const pkgManagerField = pkg.packageManager;
+  if (pkgManagerField) {
+    if (pkgManagerField.startsWith('pnpm')) pm = 'pnpm';
+    else if (pkgManagerField.startsWith('yarn')) pm = 'yarn';
+    else if (pkgManagerField.startsWith('bun')) pm = 'bun';
+    else if (pkgManagerField.startsWith('npm')) pm = 'npm';
+  }
+
+  // If project doesn't have a packageManager set, update it so the UI shows the right value
+  if (!project.packageManager && pkgManagerField) {
+    const detectedPm = pm;
+    if (detectedPm !== project.packageManager) {
+      project.packageManager = detectedPm;
+      if (appConfig && saveConfigFn) {
+        appConfig.projects = Array.from(projectMap.values());
+        saveConfigFn(appConfig).catch(() => { /* ignore */ });
+      }
+    }
+  }
+
+  const preferred: string[] = [];
+  if (deps['next']) preferred.push('dev', 'start', 'build');
+  else if (deps['nuxt'] || deps['nuxt3']) preferred.push('dev', 'start', 'build');
+  else if (deps['astro']) preferred.push('dev', 'start', 'build');
+  else if (deps['@sveltejs/kit']) preferred.push('dev', 'start', 'build');
+  else if (deps['vite']) preferred.push('dev', 'start', 'build');
+  else if (deps['react-scripts']) preferred.push('start', 'dev', 'build');
+  else preferred.push('dev', 'start', 'serve');
+
+  const script = pickScript(scripts, preferred);
   if (!script) return undefined;
-  return `bun run ${script}`;
+
+  if (pm === 'bun') return `bun run ${script}`;
+  if (pm === 'pnpm') return `pnpm run ${script}`;
+  if (pm === 'yarn') return `yarn ${script}`;
+  return `npm run ${script}`;
 }
 
-function buildNodeCommand(cwd: string, packageManager: Project['packageManager']): string | undefined {
-  const pkg = readJsonFileSync<{ scripts?: Record<string, string> }>(path.join(cwd, 'package.json'));
-  if (!pkg) return undefined;
-  const script = pickScript(pkg.scripts);
-  if (!script) return undefined;
-  if (packageManager === 'bun') return `bun run ${script}`;
-  // Prefer npm inside the container because node is available and handles pnpm/yarn node_modules
-  return `npm run ${script}`;
+function detectInstallCommand(cwd: string, packageManager: Project['packageManager']): string {
+  const pm = packageManager || 'npm';
+  if (pm === 'bun') return 'bun install';
+  if (pm === 'pnpm') return 'pnpm install';
+  if (pm === 'yarn') return 'yarn install';
+  return 'npm install';
+}
+
+async function dependenciesInstalled(project: Project): Promise<{ installed: boolean; command: string }> {
+  const nodeModulesPath = path.join(project.cwd, 'node_modules');
+  if (!(await pathExists(nodeModulesPath))) {
+    return { installed: false, command: detectInstallCommand(project.cwd, project.packageManager) };
+  }
+  try {
+    const entries = await readdir(nodeModulesPath);
+    if (entries.length === 0) {
+      return { installed: false, command: detectInstallCommand(project.cwd, project.packageManager) };
+    }
+  } catch {
+    return { installed: false, command: detectInstallCommand(project.cwd, project.packageManager) };
+  }
+  return { installed: true, command: detectInstallCommand(project.cwd, project.packageManager) };
 }
 
 async function detectNodeProject(cwd: string, files: string[]): Promise<Project | null> {
@@ -152,18 +219,27 @@ async function detectNodeProject(cwd: string, files: string[]): Promise<Project 
   if (!pkg) return null;
   const name = pkg.name || path.basename(cwd);
   const packageManager = detectPackageManager(cwd, files);
-  // Prefer bun run inside the container because bun is available and handles node projects
-  const command = buildBunCommand(cwd) || buildNodeCommand(cwd, packageManager);
-  const id = generateProjectId(name);
-  return {
-    id,
+  const tempProject: Project = {
+    id: generateProjectId(name),
     name,
     cwd,
-    command,
     packageManager,
     type: packageManager === 'bun' ? 'bun' : 'node',
     autoDetect: true,
   };
+  // Use the packageManager field in package.json as the authoritative source if present
+  const pkgFull = readJsonFileSync<{ packageManager?: string }>(path.join(cwd, 'package.json'));
+  const pmField = pkgFull?.packageManager;
+  if (pmField) {
+    if (pmField.startsWith('pnpm')) tempProject.packageManager = 'pnpm';
+    else if (pmField.startsWith('yarn')) tempProject.packageManager = 'yarn';
+    else if (pmField.startsWith('bun')) tempProject.packageManager = 'bun';
+    else if (pmField.startsWith('npm')) tempProject.packageManager = 'npm';
+  }
+
+  const command = inferCommandForProject(tempProject);
+  tempProject.command = command;
+  return tempProject;
 }
 
 async function detectPythonProject(cwd: string, files: string[]): Promise<Project | null> {
@@ -580,18 +656,27 @@ async function collectStreams(
 export async function startProject(
   project: Project,
   commandOverride?: string
-): Promise<{ success: boolean; pid?: number; ports?: number[]; localUrl?: string; networkUrl?: string; error?: string }> {
+): Promise<{ success: boolean; pid?: number; ports?: number[]; localUrl?: string; networkUrl?: string; error?: string; installCommand?: string }> {
   if (project.running?.pid) {
     return { success: false, error: 'Project is already running' };
   }
 
-  let command = commandOverride || project.command;
+  let command = commandOverride || (project.autoDetect ? inferCommandForProject(project) : project.command);
   if (!command) {
     command = inferCommandForProject(project);
   }
 
   if (!command) {
     return { success: false, error: 'No start command found for project' };
+  }
+
+  const deps = await dependenciesInstalled(project);
+  if (!deps.installed) {
+    return {
+      success: false,
+      error: `Faltan dependencias. Ejecutá: ${deps.command}`,
+      installCommand: deps.command,
+    };
   }
 
   const logFile = await rotateLogFile(project.name);
@@ -644,6 +729,31 @@ export async function startProject(
     };
   } catch (error) {
     return { success: false, error: String(error) };
+  }
+}
+
+export async function installProjectDependencies(
+  project: Project
+): Promise<{ success: boolean; output?: string; error?: string; command: string }> {
+  const command = detectInstallCommand(project.cwd, project.packageManager);
+  try {
+    const shellCommand = `cd ${JSON.stringify(project.cwd)} && ${command} 2>&1`;
+    const proc = Bun.spawn(['sh', '-lc', shellCommand], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: process.env,
+    });
+    const output = await new Response(proc.stdout).text();
+    const stderr = await new Response(proc.stderr).text();
+    const exitCode = await proc.exited;
+    const combined = [output, stderr].filter(Boolean).join('\n').trim();
+    if (exitCode !== 0) {
+      return { success: false, error: combined || `Failed with exit code ${exitCode}`, command };
+    }
+    return { success: true, output: combined, command };
+  } catch (error) {
+    const errText = error instanceof Error ? error.message : String(error);
+    return { success: false, error: errText, command };
   }
 }
 
