@@ -661,7 +661,7 @@ function setLogsStatus(text, type) {
 }
 
 async function fetchLogs(project) {
-  const res = await fetch(`/api/projects/${project.id}/logs/poll?tail=500`, {
+  const res = await fetch(`/api/projects/${project.id}/logs?tail=500`, {
     headers: { 'Content-Type': 'application/json' },
     credentials: 'same-origin',
   });
