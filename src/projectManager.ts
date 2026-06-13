@@ -191,10 +191,10 @@ export function inferCommandForProject(project: Project): string | undefined {
 
 function detectInstallCommand(cwd: string, packageManager: Project['packageManager']): string {
   const pm = packageManager || 'npm';
-  if (pm === 'bun') return 'bun install';
-  if (pm === 'pnpm') return 'pnpm install';
-  if (pm === 'yarn') return 'yarn install';
-  return 'npm install';
+  if (pm === 'bun') return 'NODE_ENV=development bun install';
+  if (pm === 'pnpm') return 'NODE_ENV=development pnpm install';
+  if (pm === 'yarn') return 'NODE_ENV=development yarn install';
+  return 'NODE_ENV=development npm install';
 }
 
 async function dependenciesInstalled(project: Project): Promise<{ installed: boolean; command: string }> {
@@ -688,7 +688,7 @@ export async function startProject(
       detached: true,
       stdout: 'pipe',
       stderr: 'pipe',
-      env: process.env,
+      env: { ...process.env, NODE_ENV: 'development' },
     });
 
     const pid = proc.pid;
@@ -696,6 +696,22 @@ export async function startProject(
 
     // Start collecting logs immediately
     collectStreams(project.id, proc, logFile).catch(() => { /* ignore */ });
+
+    // Give the process a short grace period to fail fast.
+    await Bun.sleep(1500);
+    if (!isProcessAlive(pid)) {
+      runningHandles.delete(project.id);
+      const logs = await getProjectLogs(project, 50);
+      const output = logs.join('\n');
+      const installCommand = detectInstallCommand(project.cwd, project.packageManager);
+      const missingBinary = output.match(/(?:sh: \d+: )?([a-zA-Z0-9_-]+): not found|command not found/i)?.[1];
+      const error = missingBinary
+        ? `Falta el binario \"${missingBinary}\". Probá: ${installCommand}`
+        : output.includes('not found')
+          ? `El proyecto falló al iniciar. Probá: ${installCommand}`
+          : `El proyecto terminó al iniciar. Probá: ${installCommand}`;
+      return { success: false, error, installCommand };
+    }
 
     project.running = {
       pid,
@@ -741,7 +757,7 @@ export async function installProjectDependencies(
     const proc = Bun.spawn(['sh', '-lc', shellCommand], {
       stdout: 'pipe',
       stderr: 'pipe',
-      env: process.env,
+      env: { ...process.env, NODE_ENV: 'development' },
     });
     const output = await new Response(proc.stdout).text();
     const stderr = await new Response(proc.stderr).text();
