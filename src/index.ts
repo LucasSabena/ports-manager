@@ -621,8 +621,28 @@ app.get('/api/stats', async (c) => {
 });
 
 // Static files (must be after API routes)
-app.use('*', serveStatic({ root: './public' }));
-app.get('/', serveStatic({ path: './public/index.html' }));
+app.use(
+  '*',
+  serveStatic({
+    root: './public',
+    onFound: (_path, c) => {
+      c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+      c.header('Pragma', 'no-cache');
+      c.header('Expires', '0');
+    },
+  })
+);
+app.get(
+  '/',
+  serveStatic({
+    path: './public/index.html',
+    onFound: (_path, c) => {
+      c.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+      c.header('Pragma', 'no-cache');
+      c.header('Expires', '0');
+    },
+  })
+);
 
 // Error handler
 app.onError((err, c) => {
