@@ -3,22 +3,19 @@ import { readdir, readFile, stat, mkdir, unlink } from 'fs/promises';
 import { createWriteStream, readFileSync, statSync } from 'fs';
 import * as path from 'path';
 import type { AppConfig, Project } from './types';
-import { detectProcesses, getListeningPorts, getProcessListeningPorts, getServerIp } from './detector';
+import { detectProcesses, getListeningPorts, getProcessListeningPorts, getServerIp, killProcess } from './detector';
 
 const CONFIG_PATH = process.env.CONFIG_PATH || '/app/data/config.json';
 const LOG_DIR = process.env.LOG_DIR || '/app/data/logs';
 const MAX_LOG_BUFFER_LINES = 1000;
 const PORT_DETECTION_TIMEOUT_MS = 15000;
 const PORT_DETECTION_INTERVAL_MS = 500;
-const KILL_GRACE_PERIOD_MS = 2000;
+const PROJECT_SCAN_INTERVAL_MS = parseInt(process.env.PROJECT_SCAN_INTERVAL_MS || '30000', 10);
 
-const SCAN_PARENT_DIRS = [
-  '/host/Proyectos',
-  '/host/projects',
-  '/host/dev',
-  '/host',
-  '/app',
-];
+const SCAN_PARENT_DIRS = (process.env.PROJECT_SCAN_DIRS || '/host/Proyectos,/host/server-stack')
+  .split(',')
+  .map((dir) => dir.trim())
+  .filter(Boolean);
 
 const SKIP_DIRS = new Set([
   'node_modules',
@@ -56,6 +53,11 @@ const runningHandles = new Map<string, SubprocessHandle>();
 const logBuffers = new Map<string, string[]>();
 const logFiles = new Map<string, string>();
 const logSubscriptions = new Map<string, Set<(line: string) => void>>();
+let lastDiskScanAt = 0;
+
+function snapshotProjects(): Project[] {
+  return Array.from(projectMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
 
 export function initProjectManager(
   config: AppConfig,
@@ -79,16 +81,24 @@ async function pathExists(p: string): Promise<boolean> {
   }
 }
 
-function generateProjectId(name: string): string {
+function shortHash(input: string): string {
+  let hash = 5381;
+  for (let i = 0; i < input.length; i++) {
+    hash = ((hash << 5) + hash) ^ input.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36).slice(0, 5);
+}
+
+function generateProjectId(name: string, cwd = ''): string {
   const base = name
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-|-$/g, '')
     || 'project';
-  let id = base;
+  let id = cwd ? `${base}-${shortHash(cwd)}` : base;
   let counter = 1;
   while (projectMap.has(id)) {
-    id = `${base}-${counter++}`;
+    id = `${base}-${cwd ? shortHash(cwd) + '-' : ''}${counter++}`;
   }
   return id;
 }
@@ -118,22 +128,50 @@ function detectPackageManager(cwd: string, files: string[]): Project['packageMan
     if (pmField.startsWith('pnpm')) return 'pnpm';
     if (pmField.startsWith('yarn')) return 'yarn';
     if (pmField.startsWith('bun')) return 'bun';
-    if (pmField.startsWith('npm')) return 'npm';
+    if (pmField.startsWith('npm')) return 'pnpm';
   }
   if (files.includes('pnpm-lock.yaml')) return 'pnpm';
   if (files.includes('yarn.lock')) return 'yarn';
   if (files.includes('bun.lock') || files.includes('bun.lockb')) return 'bun';
-  if (files.includes('package-lock.json')) return 'npm';
-  return 'npm';
+  if (files.includes('package-lock.json')) return 'pnpm';
+  return 'pnpm';
+}
+
+function normalizePackageManager(packageManager: Project['packageManager']): Project['packageManager'] {
+  if (!packageManager || packageManager === 'npm') return 'pnpm';
+  return packageManager;
+}
+
+export function normalizeProjectCommand(command?: string): string | undefined {
+  if (!command) return command;
+  return command
+    .replace(/(^|[;&|]\s*)npm\s+run\s+/g, '$1pnpm run ')
+    .replace(/(^|[;&|]\s*)npm\s+install\b/g, '$1pnpm install')
+    .replace(/(^|[;&|]\s*)npm\s+i\b/g, '$1pnpm install')
+    .replace(/(^|[;&|]\s*)npx\s+/g, '$1pnpm dlx ');
+}
+
+function normalizeProject(project: Project): Project {
+  const normalized = {
+    ...project,
+    packageManager: project.type === 'node' || project.type === 'bun'
+      ? normalizePackageManager(project.packageManager)
+      : project.packageManager,
+    command: normalizeProjectCommand(project.command),
+  };
+  if (normalized.autoDetect) {
+    normalized.command = inferCommandForProject(normalized);
+  }
+  return normalized;
 }
 
 function pickScript(scripts: Record<string, string> | undefined, preferred?: string[]): string | undefined {
   if (!scripts) return undefined;
-  const order = preferred && preferred.length > 0 ? preferred : ['dev', 'start', 'serve'];
+  const order = preferred && preferred.length > 0 ? preferred : ['dev', 'start', 'serve', 'preview'];
   for (const name of order) {
     if (scripts[name]) return name;
   }
-  return Object.keys(scripts)[0];
+  return undefined;
 }
 
 function withHostBinding(command: string, framework: string): string {
@@ -159,6 +197,21 @@ function withHostBinding(command: string, framework: string): string {
 export function bindProjectCommandToNetwork(project: Project, command: string): string {
   if (!command) return command;
   if (command.includes('--host') || command.includes('--hostname') || command.includes('HOST=0.0.0.0')) {
+    return command;
+  }
+
+  if (project.type === 'python') {
+    const lower = command.toLowerCase();
+    if (lower.includes('uvicorn')) {
+      return `${command} --host 0.0.0.0`;
+    }
+    if (lower.includes('flask')) {
+      return `${command} --host=0.0.0.0`;
+    }
+    return command;
+  }
+
+  if (project.type !== 'node' && project.type !== 'bun') {
     return command;
   }
 
@@ -189,25 +242,21 @@ export function inferCommandForProject(project: Project): string | undefined {
   const scripts = pkg.scripts || {};
   const deps = { ...pkg.dependencies, ...pkg.devDependencies };
 
-  // Prefer the package manager declared in package.json, then the project/lockfile-derived one, fallback npm
-  let pm = project.packageManager || 'npm';
+  // Prefer the package manager declared in package.json, then the project/lockfile-derived one.
+  let pm = normalizePackageManager(project.packageManager);
   const pkgManagerField = pkg.packageManager;
   if (pkgManagerField) {
     if (pkgManagerField.startsWith('pnpm')) pm = 'pnpm';
     else if (pkgManagerField.startsWith('yarn')) pm = 'yarn';
     else if (pkgManagerField.startsWith('bun')) pm = 'bun';
-    else if (pkgManagerField.startsWith('npm')) pm = 'npm';
+    else if (pkgManagerField.startsWith('npm')) pm = 'pnpm';
   }
 
-  // If project doesn't have a packageManager set, update it so the UI shows the right value
+  // If project doesn't have a packageManager set, update the in-memory copy so the UI shows it.
   if (!project.packageManager && pkgManagerField) {
     const detectedPm = pm;
     if (detectedPm !== project.packageManager) {
       project.packageManager = detectedPm;
-      if (appConfig && saveConfigFn) {
-        appConfig.projects = Array.from(projectMap.values());
-        saveConfigFn(appConfig).catch(() => { /* ignore */ });
-      }
     }
   }
 
@@ -215,24 +264,24 @@ export function inferCommandForProject(project: Project): string | undefined {
   const preferred: string[] = [];
   if (deps['next']) {
     framework = 'next';
-    preferred.push('dev', 'start', 'build');
+    preferred.push('dev', 'start');
   } else if (deps['nuxt'] || deps['nuxt3']) {
     framework = 'nuxt';
-    preferred.push('dev', 'start', 'build');
+    preferred.push('dev', 'start', 'preview');
   } else if (deps['astro']) {
     framework = 'astro';
-    preferred.push('dev', 'start', 'build');
+    preferred.push('dev', 'start', 'preview');
   } else if (deps['@sveltejs/kit']) {
     framework = 'sveltekit';
-    preferred.push('dev', 'start', 'build');
+    preferred.push('dev', 'start', 'preview');
   } else if (deps['vite']) {
     framework = 'vite';
-    preferred.push('dev', 'start', 'build');
+    preferred.push('dev', 'start', 'preview');
   } else if (deps['react-scripts']) {
     framework = 'react-scripts';
-    preferred.push('start', 'dev', 'build');
+    preferred.push('start', 'dev');
   } else {
-    preferred.push('dev', 'start', 'serve');
+    preferred.push('dev', 'start', 'serve', 'preview');
   }
 
   const script = pickScript(scripts, preferred);
@@ -244,20 +293,26 @@ export function inferCommandForProject(project: Project): string | undefined {
       ? `pnpm run ${script}`
       : pm === 'yarn'
         ? `yarn ${script}`
-        : `npm run ${script}`;
+        : `pnpm run ${script}`;
 
-  return withHostBinding(base, framework);
+  return normalizeProjectCommand(withHostBinding(base, framework));
 }
 
 function detectInstallCommand(cwd: string, packageManager: Project['packageManager']): string {
-  const pm = packageManager || 'npm';
+  if (!packageManager && pathExistsSync(path.join(cwd, 'requirements.txt'))) {
+    return 'python -m pip install --break-system-packages -r requirements.txt';
+  }
+  const pm = packageManager || 'pnpm';
   if (pm === 'bun') return 'NODE_ENV=development bun install';
   if (pm === 'pnpm') return 'NODE_ENV=development pnpm install';
   if (pm === 'yarn') return 'NODE_ENV=development yarn install';
-  return 'NODE_ENV=development npm install';
+  return 'NODE_ENV=development pnpm install';
 }
 
 async function dependenciesInstalled(project: Project): Promise<{ installed: boolean; command: string }> {
+  if (project.type !== 'node' && project.type !== 'bun') {
+    return { installed: true, command: '' };
+  }
   const nodeModulesPath = path.join(project.cwd, 'node_modules');
   if (!(await pathExists(nodeModulesPath))) {
     return { installed: false, command: detectInstallCommand(project.cwd, project.packageManager) };
@@ -280,7 +335,7 @@ async function detectNodeProject(cwd: string, files: string[]): Promise<Project 
   const name = pkg.name || path.basename(cwd);
   const packageManager = detectPackageManager(cwd, files);
   const tempProject: Project = {
-    id: generateProjectId(name),
+    id: generateProjectId(name, cwd),
     name,
     cwd,
     packageManager,
@@ -294,7 +349,7 @@ async function detectNodeProject(cwd: string, files: string[]): Promise<Project 
     if (pmField.startsWith('pnpm')) tempProject.packageManager = 'pnpm';
     else if (pmField.startsWith('yarn')) tempProject.packageManager = 'yarn';
     else if (pmField.startsWith('bun')) tempProject.packageManager = 'bun';
-    else if (pmField.startsWith('npm')) tempProject.packageManager = 'npm';
+    else if (pmField.startsWith('npm')) tempProject.packageManager = 'pnpm';
   }
 
   const command = inferCommandForProject(tempProject);
@@ -314,7 +369,7 @@ async function detectPythonProject(cwd: string, files: string[]): Promise<Projec
   else if (hasMainPy) command = 'python main.py';
 
   return {
-    id: generateProjectId(name),
+    id: generateProjectId(name, cwd),
     name,
     cwd,
     command,
@@ -324,7 +379,6 @@ async function detectPythonProject(cwd: string, files: string[]): Promise<Projec
 }
 
 async function scanDirectory(baseDir: string, depth: number, detected: Project[], seenCwds: Set<string>): Promise<void> {
-  if (depth <= 0) return;
   if (!(await pathExists(baseDir))) return;
   const baseName = path.basename(baseDir);
   if (baseName.startsWith('.') || SKIP_DIRS.has(baseName)) return;
@@ -344,7 +398,6 @@ async function scanDirectory(baseDir: string, depth: number, detected: Project[]
         detected.push(nodeProject);
         seenCwds.add(baseDir);
       }
-      return;
     }
 
     const pythonProject = await detectPythonProject(baseDir, files);
@@ -353,8 +406,9 @@ async function scanDirectory(baseDir: string, depth: number, detected: Project[]
         detected.push(pythonProject);
         seenCwds.add(baseDir);
       }
-      return;
     }
+
+    if (depth <= 0) return;
 
     // No project files here, scan subdirectories
     const entries = await readdir(baseDir, { withFileTypes: true });
@@ -385,7 +439,7 @@ export async function loadProjects(): Promise<Project[]> {
 
   // Saved projects take precedence by cwd
   for (const project of saved) {
-    merged.set(project.cwd, { ...project });
+    merged.set(project.cwd, normalizeProject(project));
   }
 
   for (const project of detected) {
@@ -400,6 +454,13 @@ export async function loadProjects(): Promise<Project[]> {
   for (const project of projects) {
     projectMap.set(project.id, project);
   }
+
+  if (appConfig && saveConfigFn) {
+    appConfig.projects = projects;
+    await saveConfigFn(appConfig);
+  }
+
+  lastDiskScanAt = Date.now();
 
   return projects;
 }
@@ -423,7 +484,7 @@ export async function deleteProject(id: string): Promise<{ success: boolean; err
   if (project.running?.pid) {
     await stopProject(project);
   }
-  const others = getProjects().filter((p) => p.id !== id);
+  const others = snapshotProjects().filter((p) => p.id !== id);
   await saveProjects(others);
   logBuffers.delete(id);
   logFiles.delete(id);
@@ -432,46 +493,20 @@ export async function deleteProject(id: string): Promise<{ success: boolean; err
 }
 
 export function getProjects(): Project[] {
-  syncRunningProjectsWithProcesses();
-  return Array.from(projectMap.values()).sort((a, b) => a.name.localeCompare(b.name));
+  return snapshotProjects();
+}
+
+export async function refreshProjects(options: { rescan?: boolean } = {}): Promise<Project[]> {
+  const shouldRescan = options.rescan || (Date.now() - lastDiskScanAt > PROJECT_SCAN_INTERVAL_MS);
+  if (shouldRescan) {
+    await loadProjects();
+  }
+  await syncRunningProjectsWithProcesses();
+  return snapshotProjects();
 }
 
 export function getRunningProjects(): Project[] {
   return getProjects().filter((p) => p.running);
-}
-
-export function inferCommandForProject(project: Project): string | undefined {
-  if (project.type === 'python') {
-    if (pathExistsSync(path.join(project.cwd, 'app.py'))) return 'python app.py';
-    if (pathExistsSync(path.join(project.cwd, 'main.py'))) return 'python main.py';
-    return undefined;
-  }
-
-  const pkg = readJsonFileSync<{ scripts?: Record<string, string>; dependencies?: Record<string, string>; devDependencies?: Record<string, string> }>(path.join(project.cwd, 'package.json'));
-  if (!pkg) return undefined;
-
-  const scripts = pkg.scripts || {};
-  const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-
-  // Framework-aware preferred script order
-  const preferred: string[] = [];
-  if (deps['next']) preferred.push('dev', 'start', 'build');
-  else if (deps['nuxt'] || deps['nuxt3']) preferred.push('dev', 'start', 'build');
-  else if (deps['astro']) preferred.push('dev', 'start', 'build');
-  else if (deps['@sveltejs/kit']) preferred.push('dev', 'start', 'build');
-  else if (deps['vite']) preferred.push('dev', 'start', 'build');
-  else if (deps['react-scripts']) preferred.push('start', 'dev', 'build');
-  else preferred.push('dev', 'start', 'serve');
-
-  const script = pickScript(scripts, preferred);
-  if (!script) return undefined;
-
-  // Prefer the package manager used by the project
-  const pm = project.packageManager || 'npm';
-  if (pm === 'bun') return `bun run ${script}`;
-  if (pm === 'pnpm') return `pnpm run ${script}`;
-  if (pm === 'yarn') return `yarn ${script}`;
-  return `npm run ${script}`;
 }
 
 function pathExistsSync(p: string): boolean {
@@ -484,7 +519,6 @@ function pathExistsSync(p: string): boolean {
 }
 
 export function getProjectById(id: string): Project | undefined {
-  syncRunningProjectsWithProcesses().catch(() => { /* ignore */ });
   return projectMap.get(id);
 }
 
@@ -570,14 +604,9 @@ async function syncRunningProjectsWithProcesses(): Promise<void> {
   }
 
   if (changed && appConfig && saveConfigFn) {
-    appConfig.projects = Array.from(projectMap.values());
-    saveConfigFn(appConfig).catch(() => { /* ignore */ });
+    appConfig.projects = snapshotProjects();
+    await saveConfigFn(appConfig);
   }
-}
-
-function syncRunningProjects(): void {
-  // Kept for callers that already expect sync behavior
-  syncRunningProjectsWithProcesses().catch(() => { /* ignore */ });
 }
 
 async function ensureLogDir(): Promise<void> {
@@ -717,17 +746,25 @@ export async function startProject(
   project: Project,
   commandOverride?: string
 ): Promise<{ success: boolean; pid?: number; ports?: number[]; localUrl?: string; networkUrl?: string; error?: string; installCommand?: string }> {
+  await syncRunningProjectsWithProcesses();
+
   if (project.running?.pid) {
     return { success: false, error: 'Project is already running' };
   }
 
-  let command = commandOverride || (project.autoDetect ? inferCommandForProject(project) : project.command);
+  if (project.type === 'node' || project.type === 'bun') {
+    project.packageManager = normalizePackageManager(project.packageManager);
+  }
+  project.command = normalizeProjectCommand(project.command);
+
+  let command = normalizeProjectCommand(commandOverride) || (project.autoDetect ? inferCommandForProject(project) : project.command);
   if (!command) {
     command = inferCommandForProject(project);
   }
 
   if (command) {
-    command = bindProjectCommandToNetwork(project, command);
+    command = bindProjectCommandToNetwork(project, normalizeProjectCommand(command) || command);
+    project.command = command;
   }
 
   if (!command) {
@@ -782,27 +819,26 @@ export async function startProject(
       ports: [],
       startedAt: new Date().toISOString(),
     };
-    await saveProjects(getProjects());
+    await saveProjects(snapshotProjects());
 
     // Detect ports in background and update project once found
     (async () => {
       const ports = await waitForPorts(pid);
-      const serverIp = await getServerIp();
       const fresh = getProjectById(project.id);
       if (fresh && fresh.running?.pid === pid) {
-        fresh.running.ports = ports;
-        await saveProjects(getProjects());
+        fresh.running.ports = ports.length > 0 ? ports : (fresh.port ? [fresh.port] : []);
+        await saveProjects(snapshotProjects());
       }
       if (logSubscriptions.has(project.id)) {
         // nothing extra needed; subscriptions receive live lines
       }
     })().catch(() => { /* ignore background errors */ });
 
-    const port = project.running.ports?.[0];
+    const port = project.running.ports?.[0] || project.port;
     return {
       success: true,
       pid,
-      ports: project.running.ports,
+      ports: project.running.ports?.length ? project.running.ports : (project.port ? [project.port] : []),
       localUrl: port ? `http://localhost:${port}` : undefined,
       networkUrl: port ? `http://${await getServerIp()}:${port}` : undefined,
       error: port ? undefined : 'Process started; port detection in progress',
@@ -838,6 +874,8 @@ export async function installProjectDependencies(
 }
 
 export async function stopProject(project: Project): Promise<{ success: boolean; error?: string }> {
+  await syncRunningProjectsWithProcesses();
+
   if (!project.running?.pid) {
     return { success: false, error: 'Project is not running' };
   }
@@ -846,18 +884,8 @@ export async function stopProject(project: Project): Promise<{ success: boolean;
   const handle = runningHandles.get(project.id);
 
   try {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch { /* ignore */ }
-
-    await Bun.sleep(KILL_GRACE_PERIOD_MS);
-
-    try {
-      process.kill(pid, 0);
-      process.kill(pid, 'SIGKILL');
-    } catch {
-      // process already gone
-    }
+    const killed = await killProcess(pid);
+    if (!killed.success) return killed;
 
     if (handle) {
       try {
@@ -867,7 +895,7 @@ export async function stopProject(project: Project): Promise<{ success: boolean;
     }
 
     delete project.running;
-    await saveProjects(getProjects());
+    await saveProjects(snapshotProjects());
     return { success: true };
   } catch (error) {
     return { success: false, error: String(error) };

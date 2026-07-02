@@ -28,6 +28,7 @@ let scanInterval = 5000;
 let pollTimer = null;
 let cachedDomains = [];
 let serverIp = '';
+let serverHosts = [];
 let cachedProjects = [];
 
 // Auth
@@ -203,7 +204,9 @@ async function loadStats() {
     document.getElementById('stat-ram').textContent = `${stats.memoryPercent}%`;
     document.getElementById('stat-disk').textContent = `${stats.diskPercent}%`;
     document.getElementById('stat-load').textContent = stats.loadAverage[0]?.toFixed(2) || '-';
+    serverHosts = Array.isArray(stats.hosts) ? stats.hosts : [];
     if (stats.ip) serverIp = stats.ip;
+    if (!serverIp && serverHosts[0]?.host) serverIp = serverHosts[0].host;
   } catch (err) {
     console.error('Failed to load stats:', err);
   }
@@ -224,10 +227,11 @@ function renderProcessRow(p, isSystem, domains) {
     let domainHtml = '';
     let btnText = 'Dominio';
     if (domain) {
-      domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">🌐 ${escapeHtml(domain.subdomain)}</a>`;
+      domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
       btnText = 'Editar dominio';
     }
-    return `<div class="port-line"><span class="badge badge-other">${port}</span>${domainHtml}<button class="btn-action" onclick="event.stopPropagation(); openDomainModal('${encodeURIComponent(projectName)}', ${port}, 'process')">${btnText}</button></div>`;
+    const listenerNote = renderListenerNote(p, port);
+    return `<div class="port-line"><span class="badge badge-other">${port}</span>${listenerNote}${renderPortLinkAnchors(port)}${domainHtml}<button class="btn-action" onclick="event.stopPropagation(); openDomainModal('${encodeURIComponent(projectName)}', ${port}, 'process')">${btnText}</button></div>`;
   }).join('');
 
   const projectCell = isSystem
@@ -310,10 +314,10 @@ function renderDocker(containers, domains) {
           let domainHtml = '';
           let btnText = 'Dominio';
           if (domain) {
-            domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">🌐 ${escapeHtml(domain.subdomain)}</a>`;
+            domainHtml = `<a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
             btnText = 'Editar dominio';
           }
-          return `<div class="port-line"><span class="badge badge-other">${port}</span>${domainHtml}<button class="btn-action" onclick="event.stopPropagation(); openDomainModal('${encodeURIComponent(name)}', ${port}, 'docker')">${btnText}</button></div>`;
+          return `<div class="port-line"><span class="badge badge-other">${port}</span>${renderPortLinkAnchors(port)}${domainHtml}<button class="btn-action" onclick="event.stopPropagation(); openDomainModal('${encodeURIComponent(name)}', ${port}, 'docker')">${btnText}</button></div>`;
         }).join('')
       : '<div class="port-line"><span class="badge badge-other">Ninguno</span></div>';
 
@@ -370,20 +374,86 @@ function getProjectPorts(project) {
   return [];
 }
 
-function getNetworkHost() {
-  return serverIp || window.location.hostname;
+function isLocalBrowserHost() {
+  return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(window.location.hostname);
 }
 
-function renderProjectLink(port, label, host) {
-  const url = `http://${host}:${port}`;
-  const cls = label === 'Local' ? 'link-local' : 'link-network';
+function isIpLike(host) {
+  return /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.includes(':');
+}
+
+function formatUrlHost(host) {
+  if (host.includes(':') && !host.startsWith('[')) return `[${host}]`;
+  return host;
+}
+
+function currentHostCandidate() {
+  const host = window.location.hostname;
+  if (!host || host.endsWith('.binaryserver.com.ar')) return null;
+  return host;
+}
+
+function getDirectLinkHosts() {
+  const seen = new Set();
+  const hosts = [];
+  const add = (label, host, kind = 'network') => {
+    if (!host || seen.has(host)) return;
+    seen.add(host);
+    hosts.push({ label, host, kind });
+  };
+
+  if (isLocalBrowserHost()) {
+    add('Local', 'localhost', 'local');
+  }
+
+  for (const entry of serverHosts) {
+    if (!entry?.host) continue;
+    add(entry.label || 'Server', entry.host, entry.kind || 'network');
+  }
+
+  if (serverIp) add('Server', serverIp, 'network');
+
+  const current = currentHostCandidate();
+  if (current && isIpLike(current)) add('Este host', current, 'network');
+
+  return hosts;
+}
+
+function renderProjectLink(port, label, host, kind = 'network') {
+  const url = `http://${formatUrlHost(host)}:${port}`;
+  const cls = kind === 'local' ? 'link-local' : 'link-network';
   return `<a href="${escapeHtml(url)}" target="_blank" class="${cls}" onclick="event.stopPropagation()">${escapeHtml(label)}</a>`;
+}
+
+function renderPortLinkAnchors(port) {
+  return getDirectLinkHosts()
+    .map((entry) => renderProjectLink(port, entry.label, entry.host, entry.kind))
+    .join('');
 }
 
 function renderProjectLinks(port) {
   if (!port) return '-';
-  const host = getNetworkHost();
-  return `<div class="port-line">${renderProjectLink(port, 'Local', 'localhost')}${renderProjectLink(port, 'Network', host)}</div>`;
+  const links = renderPortLinkAnchors(port);
+  return links ? `<div class="port-line port-links">${links}</div>` : '-';
+}
+
+function isLoopbackAddress(address) {
+  return ['127.0.0.1', '::1', 'localhost'].includes(address);
+}
+
+function isWildcardAddress(address) {
+  return ['0.0.0.0', '*', '::', '[::]'].includes(address);
+}
+
+function renderListenerNote(entity, port) {
+  const listeners = (entity.listeners || []).filter((listener) => listener.port === port);
+  if (!listeners.length) return '';
+  const addresses = [...new Set(listeners.map((listener) => listener.address).filter(Boolean))];
+  if (addresses.length === 0 || addresses.some(isWildcardAddress)) return '';
+  if (addresses.every(isLoopbackAddress)) {
+    return '<small class="listener-note">solo localhost</small>';
+  }
+  return `<small class="listener-note">${escapeHtml(addresses.slice(0, 2).join(', '))}</small>`;
 }
 
 function groupProjectsByFolder(projects) {
@@ -545,6 +615,20 @@ async function pollStartLogs(project) {
   }
 }
 
+async function pollStartState(id) {
+  try {
+    const { projects } = await API.get('/api/projects');
+    cachedProjects = projects || cachedProjects;
+    const updated = projects.find((p) => p.id === id);
+    if (!updated) return;
+    if (updated.running?.ports?.length) {
+      setStartStatus(`Corriendo en ${updated.running.ports.join(', ')}`, 'connected');
+    } else if (updated.running) {
+      setStartStatus('Corriendo, detectando puerto', 'connected');
+    }
+  } catch { /* ignore */ }
+}
+
 function openStartModal(project, title) {
   startCurrentProject = project;
   startPre.textContent = '';
@@ -579,6 +663,7 @@ window.startProject = async function (idEncoded) {
     startPollTimer = setInterval(() => {
       if (!startCurrentProject) return;
       pollStartLogs(project);
+      pollStartState(id);
     }, 2000);
     setTimeout(async () => {
       try {
@@ -607,19 +692,36 @@ window.startProject = async function (idEncoded) {
 window.installProject = async function (idEncoded, fromStartModal = false, forcedCommand = '') {
   const id = decodeURIComponent(idEncoded);
   try {
+    if (fromStartModal) {
+      setStartStatus('Instalando dependencias', 'connecting');
+      appendStartLine(`$ ${forcedCommand || 'install'}`);
+    }
     const res = await API.post(`/api/projects/${id}/install`);
     if (res.success) {
-      alert(`Dependencias instaladas con ${res.command}.\n\nAhora podés iniciar el proyecto.`);
       if (fromStartModal) {
         startInstallBtn.classList.add('hidden');
         appendStartLine(`Dependencias instaladas con ${res.command}`);
+        if (res.output) appendStartLine(res.output);
+        setStartStatus('Dependencias listas', 'connected');
+      } else {
+        alert(`Dependencias instaladas con ${res.command}.\n\nAhora podés iniciar el proyecto.`);
       }
     } else {
-      alert(`Error instalando dependencias:\n${res.error}\n\nComando: ${res.command}`);
+      if (fromStartModal) {
+        setStartStatus('Error instalando', 'disconnected');
+        appendStartLine(res.error || 'Error instalando dependencias');
+      } else {
+        alert(`Error instalando dependencias:\n${res.error}\n\nComando: ${res.command}`);
+      }
     }
     refresh();
   } catch (err) {
-    alert(err.message);
+    if (fromStartModal) {
+      setStartStatus('Error instalando', 'disconnected');
+      appendStartLine(err.message);
+    } else {
+      alert(err.message);
+    }
   }
 };
 
@@ -627,7 +729,10 @@ window.stopProject = async function (idEncoded) {
   const id = decodeURIComponent(idEncoded);
   if (!confirm('Detener este proyecto?')) return;
   try {
-    await API.post(`/api/projects/${id}/stop`);
+    const res = await API.post(`/api/projects/${id}/stop`);
+    if (!res.success) {
+      alert(res.error || 'No se pudo detener');
+    }
     refresh();
   } catch (err) {
     alert(err.message);
@@ -799,7 +904,7 @@ function openDetailModal(p) {
   const ports = (p.ports || []).map((port) => {
     const domain = cachedDomains.find((d) => d.projectName === matchName && d.port === port);
     if (domain) {
-      return `<span class="badge badge-other">${port}</span><a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">🌐 ${escapeHtml(domain.subdomain)}</a>`;
+      return `<span class="badge badge-other">${port}</span><a href="https://${escapeHtml(domain.fullDomain)}" target="_blank" class="domain-link" onclick="event.stopPropagation()">${escapeHtml(domain.subdomain)}</a>`;
     }
     return `<span class="badge badge-other">${port}</span>`;
   }).join(' ');
@@ -854,13 +959,7 @@ function renderDetailLinks(p) {
     dd.textContent = '-';
     return;
   }
-  const host = getNetworkHost();
-  dd.innerHTML = `
-    <div class="port-line">
-      ${renderProjectLink(firstPort, 'Local', 'localhost')}
-      ${renderProjectLink(firstPort, 'Network', host)}
-    </div>
-  `;
+  dd.innerHTML = renderProjectLinks(firstPort);
 }
 
 function closeDetailModal() {

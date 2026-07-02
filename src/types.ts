@@ -27,6 +27,14 @@ export interface LogSource {
   unit?: string;
 }
 
+export interface PortListener {
+  protocol: 'tcp' | 'udp';
+  address: string;
+  port: number;
+  pid: number;
+  processName?: string;
+}
+
 export interface DetectedProcess {
   pid: number;
   ppid: number;
@@ -35,6 +43,7 @@ export interface DetectedProcess {
   cwd: string;
   projectName: string;
   ports: number[];
+  listeners?: PortListener[];
   type: 'node' | 'bun' | 'python' | 'docker' | 'other';
   uptimeSeconds: number;
   memoryMb: number;

@@ -40,7 +40,9 @@ import { getServerStats } from './stats';
 import {
   initProjectManager,
   bindProjectCommandToNetwork,
+  normalizeProjectCommand,
   getProjects,
+  refreshProjects,
   getProjectById,
   inferCommandForProject,
   loadProjects,
@@ -117,18 +119,27 @@ app.get('/api/me', async (c) => {
 app.use('/api/*', requireAuth);
 
 app.get('/api/projects', async (c) => {
-  const projects = getProjects();
+  const projects = await refreshProjects();
   const enriched = await Promise.all(
     projects.map(async (p) => {
       const inferred = p.autoDetect ? inferCommandForProject(p) || p.command : p.command;
       const command = inferred ? bindProjectCommandToNetwork(p, inferred) : inferred;
-      const nodeModulesPath = path.join(p.cwd, 'node_modules');
       let needsInstall = false;
-      try {
-        const entries = await readdir(nodeModulesPath);
-        needsInstall = entries.length === 0;
-      } catch {
-        needsInstall = true;
+      if ((p.type === 'node' || p.type === 'bun') && !p.running) {
+        const nodeModulesPath = path.join(p.cwd, 'node_modules');
+        try {
+          const entries = await readdir(nodeModulesPath);
+          needsInstall = entries.length === 0;
+        } catch {
+          needsInstall = true;
+        }
+      } else if (p.type === 'python' && !p.running) {
+        try {
+          await readFile(path.join(p.cwd, 'requirements.txt'), 'utf-8');
+          needsInstall = true;
+        } catch {
+          needsInstall = false;
+        }
       }
       return { ...p, command, needsInstall };
     })
@@ -138,7 +149,7 @@ app.get('/api/projects', async (c) => {
 
 app.post('/api/projects/detect', async (c) => {
   const detected = await detectProjectsFromDisk();
-  const existing = getProjects();
+  const existing = await refreshProjects();
   const byCwd = new Map(existing.map((p) => [p.cwd, p]));
   for (const project of detected) {
     if (!byCwd.has(project.cwd)) {
@@ -147,7 +158,7 @@ app.post('/api/projects/detect', async (c) => {
   }
   const merged = Array.from(byCwd.values()).sort((a, b) => a.name.localeCompare(b.name));
   await saveProjects(merged);
-  return c.json({ projects: getProjects() });
+  return c.json({ projects: await refreshProjects() });
 });
 
 app.post('/api/projects', async (c) => {
@@ -156,6 +167,7 @@ app.post('/api/projects', async (c) => {
     return c.json({ error: 'Missing required fields: name, cwd, type' }, 400);
   }
 
+  await refreshProjects();
   const existing = body.id ? getProjectById(body.id) : undefined;
   const id = existing ? existing.id : body.id || generateId();
 
@@ -163,8 +175,8 @@ app.post('/api/projects', async (c) => {
     id,
     name: body.name,
     cwd: body.cwd,
-    command: body.command,
-    packageManager: body.packageManager,
+    command: normalizeProjectCommand(body.command),
+    packageManager: body.packageManager === 'npm' ? 'pnpm' : body.packageManager,
     type: body.type,
     port: body.port,
     startUrl: body.startUrl,
@@ -179,6 +191,7 @@ app.post('/api/projects', async (c) => {
 
 app.delete('/api/projects/:id', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const result = await deleteProject(id);
   if (!result.success) {
     return c.json({ error: result.error }, 404);
@@ -188,6 +201,7 @@ app.delete('/api/projects/:id', async (c) => {
 
 app.get('/api/projects/:id', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const project = getProjectById(id);
   if (!project) {
     return c.json({ error: 'Project not found' }, 404);
@@ -197,6 +211,7 @@ app.get('/api/projects/:id', async (c) => {
 
 app.post('/api/projects/:id/start', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const project = getProjectById(id);
   if (!project) {
     return c.json({ error: 'Project not found' }, 404);
@@ -219,6 +234,7 @@ app.post('/api/projects/:id/start', async (c) => {
 
 app.post('/api/projects/:id/install', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const project = getProjectById(id);
   if (!project) {
     return c.json({ error: 'Project not found' }, 404);
@@ -229,6 +245,7 @@ app.post('/api/projects/:id/install', async (c) => {
 
 app.post('/api/projects/:id/stop', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const project = getProjectById(id);
   if (!project) {
     return c.json({ error: 'Project not found' }, 404);
@@ -239,6 +256,7 @@ app.post('/api/projects/:id/stop', async (c) => {
 
 app.get('/api/projects/:id/logs', async (c) => {
   const id = c.req.param('id');
+  await refreshProjects();
   const project = getProjectById(id);
   if (!project) {
     return c.json({ error: 'Project not found' }, 404);
@@ -285,6 +303,14 @@ app.post('/api/processes/:pid/kill', async (c) => {
   const pid = parseInt(c.req.param('pid'), 10);
   if (config.settings.protectedPids.includes(pid)) {
     return c.json({ error: 'Protected process' }, 403);
+  }
+  const protectedPorts = config.settings.protectedPorts || [];
+  const listeningPorts = (await getListeningPorts())
+    .filter((m) => m.pid === pid)
+    .map((m) => m.port);
+  const protectedPort = listeningPorts.find((port) => protectedPorts.includes(port));
+  if (protectedPort) {
+    return c.json({ error: `Protected port ${protectedPort}` }, 403);
   }
   const result = await killProcess(pid);
   return c.json(result);

@@ -11,6 +11,13 @@ export interface ServerStats {
   loadAverage: number[];
   temperatures?: Record<string, number>;
   ip?: string;
+  hosts?: ServerHost[];
+}
+
+export interface ServerHost {
+  label: string;
+  host: string;
+  kind: 'tailscale' | 'lan' | 'route' | 'other';
 }
 
 function parseMeminfo(content: string, key: string): number {
@@ -55,9 +62,8 @@ export async function getServerStats(): Promise<ServerStats> {
 
     const temperatures = parseSensors(sensors);
 
-    const ipOutput = await $`ip route get 1.1.1.1`.text().catch(() => '');
-    const ipMatch = ipOutput.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
-    const serverIp = (ipMatch && !ipMatch[1].startsWith('127.')) ? ipMatch[1] : '';
+    const hosts = await getServerHosts();
+    const serverIp = hosts[0]?.host || '';
 
     return {
       cpuPercent,
@@ -70,6 +76,7 @@ export async function getServerStats(): Promise<ServerStats> {
       loadAverage,
       temperatures,
       ip: serverIp,
+      hosts,
     };
   } catch (error) {
     console.error('Failed to get server stats:', error);
@@ -84,6 +91,66 @@ export async function getServerStats(): Promise<ServerStats> {
       loadAverage: [],
     };
   }
+}
+
+function classifyHost(ip: string): ServerHost['kind'] {
+  const parts = ip.split('.').map((part) => parseInt(part, 10));
+  if (parts.length !== 4 || parts.some((part) => Number.isNaN(part))) return 'other';
+  const [a, b] = parts;
+  if (a === 100 && b >= 64 && b <= 127) return 'tailscale';
+  if (a === 10 || (a === 192 && b === 168) || (a === 172 && b >= 16 && b <= 31)) return 'lan';
+  return 'other';
+}
+
+function labelForHost(ip: string, kind: ServerHost['kind'], iface?: string): string {
+  if (kind === 'tailscale') return 'Tailscale';
+  if (kind === 'lan') return iface ? `LAN ${iface}` : 'LAN';
+  if (kind === 'route') return 'Red';
+  return iface ? `Host ${iface}` : 'Host';
+}
+
+async function getServerHosts(): Promise<ServerHost[]> {
+  const hosts = new Map<string, ServerHost>();
+
+  const add = (ip: string, kind?: ServerHost['kind'], iface?: string) => {
+    if (!ip || ip.startsWith('127.')) return;
+    const detectedKind = kind || classifyHost(ip);
+    const existing = hosts.get(ip);
+    if (!existing) {
+      hosts.set(ip, {
+        host: ip,
+        kind: detectedKind,
+        label: labelForHost(ip, detectedKind, iface),
+      });
+      return;
+    }
+
+    const weight: Record<ServerHost['kind'], number> = { tailscale: 0, lan: 1, route: 2, other: 3 };
+    if (weight[detectedKind] < weight[existing.kind]) {
+      hosts.set(ip, {
+        host: ip,
+        kind: detectedKind,
+        label: labelForHost(ip, detectedKind, iface),
+      });
+    }
+  };
+
+  const routeOutput = await $`ip route get 1.1.1.1`.text().catch(() => '');
+  const routeMatch = routeOutput.match(/src\s+(\d+\.\d+\.\d+\.\d+)/);
+  if (routeMatch) add(routeMatch[1], 'route');
+
+  const addrOutput = await $`ip -4 -o addr show scope global`.text().catch(() => '');
+  for (const line of addrOutput.split('\n').filter(Boolean)) {
+    const match = line.match(/^\d+:\s+([^:\s]+).*?\sinet\s+(\d+\.\d+\.\d+\.\d+)\/\d+/);
+    if (!match) continue;
+    if (/^(docker|br-|veth|virbr|podman|cni)/.test(match[1])) continue;
+    add(match[2], classifyHost(match[2]), match[1]);
+  }
+
+  return Array.from(hosts.values()).sort((a, b) => {
+    const weight: Record<ServerHost['kind'], number> = { tailscale: 0, lan: 1, route: 2, other: 3 };
+    return weight[a.kind] - weight[b.kind] || a.label.localeCompare(b.label);
+  });
 }
 
 let lastCpuStats: { user: number; nice: number; system: number; idle: number; iowait: number; irq: number; softirq: number; steal: number; total: number; time: number } | null = null;

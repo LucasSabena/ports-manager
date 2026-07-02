@@ -1,13 +1,9 @@
 import { $ } from 'bun';
 import { readdir, readFile, readlink, stat } from 'fs/promises';
 import * as path from 'path';
-import type { DetectedProcess, DockerContainer, DockerContainerStats, LogSource, ProcessStats } from './types';
+import type { DetectedProcess, DockerContainer, DockerContainerStats, LogSource, PortListener, ProcessStats } from './types';
 
-interface PortMapping {
-  pid: number;
-  port: number;
-  localAddress: string;
-}
+type PortMapping = PortListener;
 
 let clockTickHz = 0;
 
@@ -102,20 +98,58 @@ function hexToIp(hex: string): string {
   return groups.join(':');
 }
 
+function parseEndpoint(endpoint: string): { address: string; port: number } | null {
+  const clean = endpoint.trim();
+  if (!clean || clean.endsWith(':*')) return null;
+
+  const bracketMatch = clean.match(/^\[([^\]]+)\]:(\d+)$/);
+  if (bracketMatch) {
+    return { address: bracketMatch[1], port: parseInt(bracketMatch[2], 10) };
+  }
+
+  const lastColon = clean.lastIndexOf(':');
+  if (lastColon < 0) return null;
+  const port = parseInt(clean.slice(lastColon + 1), 10);
+  if (!Number.isFinite(port)) return null;
+  return { address: clean.slice(0, lastColon), port };
+}
+
+function parseUsers(users: string): Array<{ pid: number; name?: string }> {
+  const result: Array<{ pid: number; name?: string }> = [];
+  const regex = /\("([^"]+)",pid=(\d+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(users)) !== null) {
+    result.push({ name: match[1], pid: parseInt(match[2], 10) });
+  }
+  return result;
+}
+
 export async function getListeningPorts(): Promise<PortMapping[]> {
   try {
-    const output = await $`ss -tlnp`.text();
-    const lines = output.split('\n').slice(1);
+    const output = await $`ss -H -tulnp`.text();
+    const lines = output.split('\n').filter(Boolean);
     const mappings: PortMapping[] = [];
 
     for (const line of lines) {
-      const match = line.match(/^\s*\S+\s+\d+\s+\d+\s+(\S+):(\d+)\s+\S+\s+.*users:\(\("([^"]+)",pid=(\d+)/);
-      if (match) {
-        const [, localAddress, portStr, , pidStr] = match;
+      const fields = line.trim().split(/\s+/);
+      const protocol = fields[0] === 'udp' ? 'udp' : fields[0] === 'tcp' ? 'tcp' : undefined;
+      if (!protocol) continue;
+
+      const local = fields[4];
+      const endpoint = parseEndpoint(local);
+      if (!endpoint) continue;
+
+      const usersIndex = line.indexOf('users:');
+      if (usersIndex < 0) continue;
+
+      const users = parseUsers(line.slice(usersIndex));
+      for (const user of users) {
         mappings.push({
-          pid: parseInt(pidStr, 10),
-          port: parseInt(portStr, 10),
-          localAddress,
+          protocol,
+          pid: user.pid,
+          processName: user.name,
+          port: endpoint.port,
+          address: endpoint.address,
         });
       }
     }
@@ -127,19 +161,11 @@ export async function getListeningPorts(): Promise<PortMapping[]> {
 
 export async function getProcessListeningPorts(pid: number): Promise<number[]> {
   try {
-    const output = await $`ss -tlnp`.text();
-    const lines = output.split('\n').slice(1);
-    const ports = new Set<number>();
-
-    for (const line of lines) {
-      const match = line.match(/^\s*\S+\s+\d+\s+\d+\s+(\S+):(\d+)\s+\S+\s+.*users:\(\("([^"]+)",pid=(\d+)/);
-      if (match) {
-        const [, , portStr, , pidStr] = match;
-        if (parseInt(pidStr, 10) === pid) {
-          ports.add(parseInt(portStr, 10));
-        }
-      }
-    }
+    const ports = new Set(
+      (await getListeningPorts())
+        .filter((m) => m.pid === pid)
+        .map((m) => m.port)
+    );
     return Array.from(ports).sort((a, b) => a - b);
   } catch {
     return [];
@@ -332,15 +358,68 @@ export async function getProcessOpenFiles(pid: number): Promise<string[]> {
   }
 }
 
+async function getChildPids(pid: number): Promise<number[]> {
+  const children: number[] = [];
+  try {
+    const content = await readFile(`/proc/${pid}/task/${pid}/children`, 'utf-8');
+    const pids = content
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((v) => parseInt(v, 10))
+      .filter((v) => Number.isFinite(v));
+    for (const childPid of pids) {
+      children.push(childPid);
+      children.push(...await getChildPids(childPid));
+    }
+  } catch { /* ignore */ }
+  return [...new Set(children)];
+}
+
+async function getProcessGroupId(pid: number): Promise<number | null> {
+  try {
+    const statContent = await readFile(`/proc/${pid}/stat`, 'utf-8');
+    const closeParen = statContent.lastIndexOf(')');
+    if (closeParen < 0) return null;
+    const rest = statContent.slice(closeParen + 2).split(' ');
+    const pgid = parseInt(rest[2], 10);
+    return Number.isFinite(pgid) ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
 export async function killProcessGraceful(pid: number): Promise<{ success: boolean; error?: string }> {
   try {
-    await $`kill -TERM ${pid}`;
+    const pgid = await getProcessGroupId(pid);
+    const descendants = await getChildPids(pid);
+    const targets = [...descendants.reverse(), pid];
+
+    if (pgid === pid && pid > 1) {
+      try {
+        process.kill(-pid, 'SIGTERM');
+      } catch { /* fallback to per-process kill below */ }
+    }
+
+    for (const target of targets) {
+      try {
+        process.kill(target, 'SIGTERM');
+      } catch { /* ignore */ }
+    }
+
     await Bun.sleep(2000);
-    try {
-      process.kill(pid, 0);
-      await $`kill -KILL ${pid}`;
-    } catch {
-      // process already gone
+
+    if (pgid === pid && pid > 1) {
+      try {
+        process.kill(-pid, 'SIGKILL');
+      } catch { /* ignore */ }
+    }
+
+    for (const target of targets) {
+      try {
+        process.kill(target, 0);
+        process.kill(target, 'SIGKILL');
+      } catch { /* already gone */ }
     }
     return { success: true };
   } catch (error) {
@@ -431,6 +510,7 @@ export async function detectProcesses(): Promise<DetectedProcess[]> {
       if (!existing.ports.includes(mapping.port)) {
         existing.ports.push(mapping.port);
       }
+      existing.listeners = [...(existing.listeners || []), mapping];
       continue;
     }
 
@@ -440,6 +520,7 @@ export async function detectProcesses(): Promise<DetectedProcess[]> {
     processMap.set(mapping.pid, {
       ...details,
       ports: [mapping.port],
+      listeners: [mapping],
     } as DetectedProcess);
   }
 

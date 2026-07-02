@@ -8,6 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     coreutils \
     iproute2 \
     lm-sensors \
+    python3 \
+    python3-pip \
+    python3-venv \
+    python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Docker CLI

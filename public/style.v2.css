@@ -642,6 +642,17 @@ tbody tr:last-child td { border-bottom: none; }
   color: white;
 }
 
+.listener-note {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.45rem;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.14);
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
 .badge-status-running {
   background: rgba(34, 197, 94, 0.15);
   color: var(--success);
